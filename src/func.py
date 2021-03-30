@@ -7,6 +7,8 @@ import _pickle as pickle
 import bz2
 import os
 import numpy as np
+import ray
+import torch
 
 def save(file:object, filename:str, path:str):
     """
@@ -30,6 +32,7 @@ def load(file_path:str):
         obj = pickle.load(f)
         return obj
 
+
 def calc_tta(input_dim:int, tta:int, basis:float=1e5):
     """
     Calculates time-to-arriaval-embeddings, according to the paper [Robust Motion In-betweening]
@@ -52,3 +55,41 @@ def calc_tta(input_dim:int, tta:int, basis:float=1e5):
     return z
 
 
+@ray.remote
+def loadFeatures(data, feature_list):
+    data = pickle.loads(data)
+    features = []
+    for f in data["frames"]:
+        p = []
+        for feature in feature_list:
+            if feature == "rotMat":
+                p.append(np.concatenate([jo["rotMat"].ravel() for jo in f]))
+            elif feature == "isLeft" or feature == "chainPos" or feature == "geoDistanceNormalised":
+                p.append(np.concatenate([[jo[feature]] for jo in f]))
+            else:
+                p.append(np.concatenate([jo[feature] for jo in f]))
+
+        p = np.concatenate(p)
+        features.append(p)
+    return np.vstack(features)
+
+
+def processData(compressed_data, feature_list, num_cpus=24, shutdown=True):
+    ray.init(num_cpus=num_cpus,ignore_reinit_error=True)
+    data = [loadFeatures.remote(d, feature_list) for d in compressed_data]
+    data = [ray.get(d) for d in data]
+    if shutdown:
+        ray.shutdown()
+    return data
+
+
+def normaliseT(x:torch.Tensor):
+    std = torch.std(x)
+    std[std==0] = 1
+    return (x - torch.mean(x)) / std
+
+
+def normaliseN(x:np.ndarray):
+    std = np.std(x)
+    std[std==0] = 1
+    return (x-np.mean(x)) / std
