@@ -23,6 +23,7 @@ class MLP_withLabel(pl.LightningModule):
         self.keep_prob = keep_prob
         self.single_module = single_module
         self.extra_feature_len = extra_feature_len
+        self.act = nn.ReLU
 
         if load:
             self.build()
@@ -31,7 +32,7 @@ class MLP_withLabel(pl.LightningModule):
             self.k = config["k"]
             self.learning_rate = config["lr"]
             self.act = config["activation"]
-            self.loss_fn = config["loss_fn"]
+            self.loss_fn = config["ae_loss_fn"]
             self.batch_size = config["batch_size"]
 
             self.dimensions = [self.dimensions[0]-extra_feature_len, self.hidden_dim, self.k]

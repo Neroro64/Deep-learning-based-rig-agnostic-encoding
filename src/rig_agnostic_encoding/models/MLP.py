@@ -22,6 +22,7 @@ class MLP(pl.LightningModule):
         self.dimensions = dimensions
         self.keep_prob = keep_prob
         self.single_module = single_module
+        self.act = nn.ReLU
 
         if load:
             self.build()
@@ -60,7 +61,6 @@ class MLP(pl.LightningModule):
 
         if self.single_module == 0 or self.single_module == 1:
             layers = []
-            layer_sizes[-1] = (layer_sizes[-1][0], layer_sizes[-1][1] + self.extra_feature_len)
             for i, size in enumerate(layer_sizes[-1::-1]):
                 layers.append(("fc"+str(i), nn.Linear(size[1], size[0])))
                 if i < len(self.dimensions)-2:

@@ -6,6 +6,8 @@ import ray
 import torch
 from torch.utils.data import Dataset, TensorDataset
 from torch.utils.data.dataset import random_split
+import scipy.signal as signal
+import time
 
 def save(file:object, filename:str, path:str):
     """
@@ -48,13 +50,33 @@ def loadFeatures(data, feature_list):
     return np.vstack(features)
 
 
+def loadFeatures_local(data, feature_list):
+    data = pickle.loads(data)
+    features = []
+    for f in data["frames"]:
+        p = []
+        for feature in feature_list:
+            if feature == "rotMat":
+                p.append(np.concatenate([jo["rotMat"].ravel() for jo in f]))
+            elif feature == "isLeft" or feature == "chainPos" or feature == "geoDistanceNormalised":
+                p.append(np.concatenate([[jo[feature]] for jo in f]))
+            else:
+                p.append(np.concatenate([jo[feature] for jo in f]))
+
+        p = np.concatenate(p)
+        features.append(p)
+    return np.vstack(features)
+
 def processData(compressed_data, feature_list, num_cpus=24, shutdown=True):
     if not ray.is_initialized():
         ray.init(num_cpus=num_cpus,ignore_reinit_error=True)
     data = [loadFeatures.remote(d, feature_list) for d in compressed_data]
-    data = [ray.get(d) for d in data]
+    # data = [ray.get(d) for d in data]
+    data = ray.get(data)
     if shutdown:
         ray.shutdown()
+
+    # data = [loadFeatures_local(d, feature_list) for d in compressed_data]
     return data
 
 
@@ -74,7 +96,8 @@ def prepare_data(datasets:list, featureList:list,
                  train_ratio:float=0.8, val_ratio:float=0.2, test_size:int=100, SEED:int=2021):
 
    # process data
-    data = [processData(d, featureList) for d in datasets]
+    data = [processData(d, featureList, shutdown=False) for d in datasets]
+    # ray.shutdown()
     input_data = [np.vstack(d) for d in data]
     x_tensors = [normaliseT(torch.from_numpy(x).float()) for x in input_data]
     y_tensors = [torch.from_numpy(x).float() for x in input_data]
@@ -96,6 +119,7 @@ def prepare_data_withLabel(datasets:list, featureList:list, extra_feature_len:in
                  train_ratio:float=0.8, val_ratio:float=0.2, test_size:int=100, SEED:int=2021):
    # process data
     data = [processData(d, featureList, shutdown=False) for d in datasets]
+    # ray.shutdown()
     input_data = [np.vstack(d) for d in data]
     x_tensors = [normaliseT(torch.from_numpy(x).float()) for x in input_data]
     y_tensors = [torch.from_numpy(x[:, :-extra_feature_len]).float() for x in input_data]
@@ -129,3 +153,137 @@ def save_testData(test_sets, path="../../models"):
     obj = {"data": test_sets}
     with bz2.BZ2File(path + "test_data.pbz2", "w") as f:
         pickle.dump(obj, f)
+
+
+def normalise_block_function(block_fn:np.ndarray, window_size_half:int=30) -> np.ndarray:
+    """
+    Takes an ndarray of shape(n_joints, n_frames), where 1 = contact and 0 otherwise.
+    :param block_fn:
+    :param n_windows:
+    :return:
+    """
+    Frames = block_fn.shape[1]
+    t = np.arange(Frames)
+    normalised_block_fn = np.zeros_like(block_fn, dtype=np.float32)
+
+    for ts in t:
+        low = max(ts-window_size_half, 0)
+        high = min(ts+window_size_half, Frames)
+        window = np.arange(low, high)
+        slice = block_fn[:, window]
+        mean = np.mean(slice, axis=1)
+        std = np.std(slice, axis=1)
+        std[std == 0] = 1
+        normalised_block_fn[:, ts] = (block_fn[:, ts]-mean) / std
+
+    filter = signal.butter(3, .1, "low", analog=False, output="sos")
+    normalised_block_fn = signal.sosfilt(filter, normalised_block_fn)
+    return normalised_block_fn
+
+
+def extract_contact_velocity_info(data):
+    contact_info = []
+    velocity_info = []
+    for f in data["frames"]:
+        contacts = np.asarray([jo["contact"] for jo in f]).astype(np.float32)
+        velocity = np.concatenate([jo["velocity"] for jo in f])
+
+        contact_info.append(contacts)
+        velocity_info.append(velocity)
+    contact_info = np.vstack(contact_info)
+    velocity_info = np.vstack(velocity_info)
+
+    return contact_info.T, velocity_info.T
+
+def calc_tta(contacts):
+    """
+    Calculates time-to-arriaval-embeddings, according to the paper [Robust Motion In-betweening]
+    :param contacts:
+    :param basis
+    :return:
+    """
+
+    tta = np.zeros_like(contacts)
+    for j, jo in enumerate(contacts):
+        idx = np.arange(len(jo))
+        idx[jo!=1] = 0
+        diff = np.diff(idx, prepend=0)
+        diff[diff < 0] = 0
+        idx = np.where(diff > 0)[0]
+        idx = [0] + list(idx)
+
+        for i,k in zip(idx[:-1], idx[1:]):
+            k2 = k-i
+            tta[j][i:k] = np.arange(k2,0,-1)
+
+    return tta
+
+
+def calc_tta_embedding(embedd_dim:int, tta, basis: float = 1e5, window=30):
+    """
+    Calculates time-to-arriaval-embeddings, according to the paper [Robust Motion In-betweening]
+    :param contacts:
+    :param basis
+    :return:
+    """
+
+    if embedd_dim % 2 != 0:
+        d1 = embedd_dim / 2 + 1
+        d2 = embedd_dim / 2
+    else:
+        d1 = d2 = embedd_dim / 2
+
+
+    tta[tta > window] = 0
+    d1 = np.arange(0, embedd_dim, 2)
+    d2 = np.arange(1, embedd_dim, 2)
+
+    z_sin = np.sin(tta / (np.power(basis, 2.0*d1 / embedd_dim)))
+    z_cos = np.cos(tta / (np.power(basis, 2.0*d2 / embedd_dim)))
+
+    z = np.zeros(embedd_dim)
+    z[0::2] += z_sin
+    z[1::2] += z_cos
+    return z
+
+
+@ray.remote
+def remote_calc_motion_phases(datafile):
+    new_data = []
+    for d in datafile:
+        d = pickle.loads(d)
+        contacts, velocities = extract_contact_velocity_info(d)
+        normalised_block_fn = normalise_block_function(contacts)
+        velocities = np.reshape(velocities, (-1, 3, contacts.shape[1])).T
+        velocities = np.sqrt(np.sum(velocities ** 2, axis=1))
+        sin_block_fn = np.sin(normalised_block_fn)
+        phase_vector = sin_block_fn * velocities
+
+        ttas = calc_tta(contacts)
+
+        for i, f in enumerate(d["frames"]):
+            for j, jo in enumerate(f):
+                jo["sin_normalised_contact"] = sin_block_fn[j,i]
+                jo["phase_vec"] = phase_vector[j,i]
+                jo["tta"] = ttas[j,i]
+
+        new_data.append(pickle.dumps(d))
+    return new_data
+
+def compute_local_motion_phase(dir_path=""):
+    tasks = []
+    file_paths = []
+    start = time.time()
+    for dir, dname, files in os.walk(dir_path):
+        for fname in files:
+            file_path = os.path.join(dir, fname)
+            tasks.append(remote_calc_motion_phases.remote(load(file_path)))
+            file_paths.append(file_path)
+
+    while len(tasks):
+        done_id, dfs = ray.wait(tasks)
+        f = ray.get(done_id[0])
+        save(f, file_paths[done_id[0]])
+
+    ray.shutdown()
+    print("Done: {}".format(time.time() - start))

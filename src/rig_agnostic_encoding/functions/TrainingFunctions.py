@@ -155,7 +155,7 @@ def tune4_withLabel(model, train_set:Dataset, val_set:Dataset, dims:list,
 
     scheduler = ASHAScheduler(max_t = EPOCHS, grace_period=1, reduction_factor=2)
     reporter = CLIReporter(
-        parameter_columns=["k", "lr", "batch_size", "loss_fn"],
+        parameter_columns=["k", "lr", "batch_size", "hidden_dim"],
         metric_columns=["loss", "training_iteration"],
         max_error_rows=5,
         max_progress_rows=5,
@@ -192,7 +192,7 @@ def tune4_withLabel(model, train_set:Dataset, val_set:Dataset, dims:list,
 
 
 def train_multi_model_withLabel(model, datapaths:list, featureList:list, config:dict=None,
-                      extra_feature_len:int=0, extra_feature_len2:int=0,
+                      extra_feature_len:int=0, extra_feature_len2:int=0, n_epochs=300,
                       n_samples:int=30, model_name:str="model"):
     # load data
     datasets1 = [Data.load(os.path.join(DATA_PATH, path)) for path in datapaths[0]]
@@ -212,7 +212,7 @@ def train_multi_model_withLabel(model, datapaths:list, featureList:list, config:
                  for x, y, z, w in zip(val_set1, val_set2, val_set3, val_set4)]
 
     tune4_withLabel(model=model, train_set=train_set, val_set=val_set, config=config, dims=dims,
-          extra_feature_len=extra_feature_len, extra_feature_len2=extra_feature_len2,
+          extra_feature_len=extra_feature_len, extra_feature_len2=extra_feature_len2, EPOCHS=n_epochs,
           n_samples=n_samples, model_name=model_name)
 
     path=os.path.join(MODEL_PATH, model_name)
@@ -220,7 +220,7 @@ def train_multi_model_withLabel(model, datapaths:list, featureList:list, config:
     Data.save_testData([test_set1, test_set2, test_set3, test_set4], path=path)
 
 
-def train_multi_model(model, datapaths:list, featureList:list, config:dict=None,
+def train_multi_model(model, datapaths:list, featureList:list, config:dict=None, n_epochs=300,
                       n_samples:int=30, model_name:str="model"):
     # load data
     datasets1 = [Data.load(os.path.join(DATA_PATH, path)) for path in datapaths[0]]
@@ -239,7 +239,7 @@ def train_multi_model(model, datapaths:list, featureList:list, config:dict=None,
     val_set = [(torch.cat([x[0],y[0],z[0],w[0]],dim=0),torch.cat([x[1],y[1],z[1],w[1]],dim=0))
                  for x, y, z, w in zip(val_set1, val_set2, val_set3, val_set4)]
 
-    tune4(model=model, train_set=train_set, val_set=val_set, config=config, dims=dims,
+    tune4(model=model, train_set=train_set, val_set=val_set, config=config, dims=dims,EPOCHS=n_epochs,
           n_samples=n_samples, model_name=model_name)
 
     path=os.path.join(MODEL_PATH, model_name)
@@ -247,7 +247,7 @@ def train_multi_model(model, datapaths:list, featureList:list, config:dict=None,
     Data.save_testData([test_set1, test_set2, test_set3, test_set4], path=path)
 
 
-def train_single_model(model, datapaths: list, featureList: list, config: dict = None,
+def train_single_model(model, datapaths: list, featureList: list, config: dict = None,n_epochs=300,
                           n_samples: int = 30, model_name: str = "model"):
         # load data
         datasets= [Data.load(os.path.join(DATA_PATH, path)) for path in datapaths[0]]
@@ -255,7 +255,7 @@ def train_single_model(model, datapaths: list, featureList: list, config: dict =
 
         dim = len(train_set[0][0])
 
-        _tune(model=model, train_set=train_set, val_set=val_set, config=config, dim=dim,
+        _tune(model=model, train_set=train_set, val_set=val_set, config=config, dim=dim,EPOCHS=n_epochs,
                         n_samples=n_samples, model_name=model_name)
 
         path = os.path.join(MODEL_PATH, model_name)

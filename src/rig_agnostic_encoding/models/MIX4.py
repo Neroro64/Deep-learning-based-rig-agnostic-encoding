@@ -20,6 +20,7 @@ class MIX4(pl.LightningModule):
         self.name = name
         if not load:
             if not config is None:
+                self.k = config["k"]
                 self.learning_rate = config["lr"]
                 self.loss_fn = config["loss_fn"]
                 self.batch_size = config["batch_size"]

@@ -30,6 +30,7 @@ class MIX4_withLabel(pl.LightningModule):
             self.dim3 = dim3
             self.dim4 = dim4
 
+
             self.model1 = model(config=config, dimensions=[dim1],
                               extra_feature_len=extra_feature_len, name="M1")
             self.model2 = model(config=config, dimensions=[dim2],
