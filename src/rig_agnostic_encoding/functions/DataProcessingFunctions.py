@@ -3,6 +3,7 @@ import bz2
 import os
 import numpy as np
 import ray
+from ray.exceptions import  TaskCancelledError
 import torch
 from torch.utils.data import Dataset, TensorDataset
 from torch.utils.data.dataset import random_split
@@ -18,6 +19,17 @@ def save(file:object, filename:str, path:str):
     :return:
     """
     with bz2.BZ2File(os.path.join(path, filename+".pbz2"), "w") as f:
+        pickle.dump(file, f)
+
+
+def save(file:object, filepath:str):
+    """
+    Writes and compresses an object to the disk
+    :param file:
+    :param filepath:
+    :return:
+    """
+    with bz2.BZ2File(filepath, "w") as f:
         pickle.dump(file, f)
 
 
@@ -247,14 +259,39 @@ def calc_tta_embedding(embedd_dim:int, tta, basis: float = 1e5, window=30):
     return z
 
 
-@ray.remote
-def remote_calc_motion_phases(datafile):
+@ray.remote(memory=300 * 1024 * 1024)
+def remote_calc_motion_phases(datafile, id):
+    new_data = []
+    datafile = load(datafile)
+    for d in datafile:
+        d = pickle.loads(d)
+        contacts, velocities = extract_contact_velocity_info(d)
+        normalised_block_fn = normalise_block_function(contacts)
+        velocities = np.reshape(velocities, (-1, 3, contacts.shape[1]))
+        velocities = np.sqrt(np.sum(velocities ** 2, axis=1))
+        sin_block_fn = np.sin(normalised_block_fn)
+        phase_vector = sin_block_fn * velocities
+
+        ttas = calc_tta(contacts)
+
+        for i, f in enumerate(d["frames"]):
+            for j, jo in enumerate(f):
+                jo["sin_normalised_contact"] = sin_block_fn[j,i]
+                jo["phase_vec"] = phase_vector[j,i]
+                jo["tta"] = ttas[j,i]
+
+        new_data.append(pickle.dumps(d))
+        del d, contacts, velocities, normalised_block_fn, sin_block_fn, phase_vector, ttas
+    del datafile
+    return new_data, id
+
+def calc_motion_phases(datafile):
     new_data = []
     for d in datafile:
         d = pickle.loads(d)
         contacts, velocities = extract_contact_velocity_info(d)
         normalised_block_fn = normalise_block_function(contacts)
-        velocities = np.reshape(velocities, (-1, 3, contacts.shape[1])).T
+        velocities = np.reshape(velocities, (-1, 3, contacts.shape[1]))
         velocities = np.sqrt(np.sum(velocities ** 2, axis=1))
         sin_block_fn = np.sin(normalised_block_fn)
         phase_vector = sin_block_fn * velocities
@@ -271,19 +308,33 @@ def remote_calc_motion_phases(datafile):
     return new_data
 
 def compute_local_motion_phase(dir_path=""):
-    tasks = []
-    file_paths = []
-    start = time.time()
     for dir, dname, files in os.walk(dir_path):
         for fname in files:
             file_path = os.path.join(dir, fname)
-            tasks.append(remote_calc_motion_phases.remote(load(file_path)))
-            file_paths.append(file_path)
+            data = calc_motion_phases(load(file_path))
+            save(data, file_path)
 
-    while len(tasks):
-        done_id, dfs = ray.wait(tasks)
-        f = ray.get(done_id[0])
-        save(f, file_paths[done_id[0]])
+
+def remote_compute_local_motion_phase(dir_path="", cpu=6):
+    file_paths = []
+    tasks = []
+    start = time.time()
+    ray.init(ignore_reinit_error=True, num_cpus=cpu)
+    try:
+        for dir, dname, files in os.walk(dir_path):
+            for fname in files:
+                file_path = os.path.join(dir, fname)
+                file_paths.append(file_path)
+                tasks.append(remote_calc_motion_phases.remote(file_path, len(file_paths)-1))
+            # tasks = [remote_calc_motion_phases.remote(file, i) for i, file in enumerate(datafiles)]
+            # tasks.append(remote_calc_motion_phases.remote(load(file_path)))
+        while len(tasks):
+            done_id, tasks = ray.wait(tasks)
+            f, i = ray.get(done_id[0])
+            save(f, file_paths[i])
+            del f, done_id, i
+    except TaskCancelledError:
+        print("Failed")
 
     ray.shutdown()
     print("Done: {}".format(time.time() - start))
