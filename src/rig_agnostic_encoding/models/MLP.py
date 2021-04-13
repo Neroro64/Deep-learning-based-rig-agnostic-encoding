@@ -22,7 +22,7 @@ class MLP(pl.LightningModule):
         self.dimensions = dimensions
         self.keep_prob = keep_prob
         self.single_module = single_module
-        self.act = nn.ReLU
+        self.act = nn.ELU
 
         if load:
             self.build()
@@ -41,9 +41,9 @@ class MLP(pl.LightningModule):
 
             self.best_val_loss = np.inf
 
-            self.build()
-            self.encoder.apply(self.init_params)
-            self.decoder.apply(self.init_params)
+        self.build()
+        self.encoder.apply(self.init_params)
+        self.decoder.apply(self.init_params)
 
 
     def build(self):

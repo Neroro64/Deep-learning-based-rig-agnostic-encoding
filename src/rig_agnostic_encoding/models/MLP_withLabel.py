@@ -23,7 +23,7 @@ class MLP_withLabel(pl.LightningModule):
         self.keep_prob = keep_prob
         self.single_module = single_module
         self.extra_feature_len = extra_feature_len
-        self.act = nn.ReLU
+        self.act = nn.ELU
 
         if load:
             self.build()
@@ -43,8 +43,9 @@ class MLP_withLabel(pl.LightningModule):
             self.best_val_loss = np.inf
 
             self.build()
-            self.encoder.apply(self.init_params)
-            self.decoder.apply(self.init_params)
+
+        self.encoder.apply(self.init_params)
+        self.decoder.apply(self.init_params)
 
 
     def build(self):
@@ -73,7 +74,7 @@ class MLP_withLabel(pl.LightningModule):
             self.decoder = nn.Sequential()
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
-        return self.decode(self.encode(x))
+        return self.decode(*self.encode(x))
 
     def encode(self, x):
         _x, label = x[:, :-self.extra_feature_len], x[:, -self.extra_feature_len:]

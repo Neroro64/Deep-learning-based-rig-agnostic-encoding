@@ -21,10 +21,21 @@ def train(config=None, model=None , dim=None,
             num_epochs=300, num_cpus=24, num_gpus=1, model_name="model"):
 
 
-    m = model[0](config=config, dim=dim,
+    m = model[0](config=config,  dimensions=[dim],
                   train_set=train_set, val_set=val_set, test_set=test_set, name=model_name)
 
     fit(m, model_name, num_epochs, num_gpus)
+
+def train_withLabel(config=None, model=None , dim=None, extra_feature_len:int=0,
+            train_set=None, val_set=None, test_set=None,
+            num_epochs=300, num_cpus=24, num_gpus=1, model_name="model"):
+
+
+    m = model[0](config=config, dimensions=[dim], extra_feature_len=extra_feature_len,
+                  train_set=train_set, val_set=val_set, test_set=test_set, name=model_name)
+
+    fit(m, model_name, num_epochs, num_gpus)
+
 
 
 def train4(config=None, model=None, dim1=None, dim2=None, dim3=None, dim4=None,
@@ -103,6 +114,46 @@ def _tune(model, train_set:Dataset, val_set:Dataset, dim:int,
     print("Best achieved loss was: ", analysis.best_result)
     print("-"*70)
 
+def _tune_withLabel(model, train_set:Dataset, val_set:Dataset, dim:int,
+                    config:dict, EPOCHS:int=300,extra_feature_len:int=0,
+              n_gpu=1, n_samples=20, model_name="model",
+              ):
+
+
+    scheduler = ASHAScheduler(max_t = EPOCHS, grace_period=1, reduction_factor=2)
+    reporter = CLIReporter(
+        parameter_columns=["k", "lr", "batch_size", "loss_fn"],
+        metric_columns=["loss", "training_iteration"],
+        max_error_rows=5,
+        max_progress_rows=5,
+        max_report_frequency=10)
+    analysis = tune.run(
+        tune.with_parameters(
+            train_withLabel,
+            model=model,
+            dim=dim,
+            extra_feature_len=extra_feature_len,
+            train_set = train_set, val_set = val_set,
+            num_epochs = EPOCHS,
+            num_gpus=n_gpu,
+            model_name=model_name
+        ),
+        resources_per_trial= {"cpu":1, "gpu":n_gpu},
+        metric="loss",
+        mode="min",
+        config=config,
+        num_samples=n_samples,
+        scheduler=scheduler,
+        progress_reporter=reporter,
+        name=model_name,
+        verbose=False
+    )
+
+    print("-"*70)
+    print("Done")
+    print("Best hyperparameters found were: ", analysis.best_config)
+    print("Best achieved loss was: ", analysis.best_result)
+    print("-"*70)
 
 def tune4(model, train_set:Dataset, val_set:Dataset, dims:list,
           config:dict, EPOCHS:int=300,
@@ -255,8 +306,26 @@ def train_single_model(model, datapaths: list, featureList: list, config: dict =
 
         dim = len(train_set[0][0])
 
-        _tune(model=model, train_set=train_set, val_set=val_set, config=config, dim=dim,EPOCHS=n_epochs,
+        _tune(model=model, train_set=train_set, val_set=val_set, config=config, dim=dim, EPOCHS=n_epochs,
                         n_samples=n_samples, model_name=model_name)
+
+        path = os.path.join(MODEL_PATH, model_name)
+        Data.clean_checkpoints(num_keep=3, path=path)
+        Data.save_testData([test_set], path=path)
+
+
+def train_single_model_withLabel(model, datapaths: list, featureList: list, extra_feature_len:int=0,
+                       config: dict = None, n_epochs=300,
+                               n_samples: int = 30, model_name: str = "model"):
+        # load data
+        datasets = [Data.load(os.path.join(DATA_PATH, path)) for path in datapaths[0]]
+        train_set, val_set, test_set = Data.prepare_data_withLabel(datasets, featureList, extra_feature_len=extra_feature_len)
+
+        dim = len(train_set[0][0])
+
+        _tune_withLabel(model=model, train_set=train_set, val_set=val_set, config=config, dim=dim, EPOCHS=n_epochs,
+              extra_feature_len=extra_feature_len,
+              n_samples=n_samples, model_name=model_name)
 
         path = os.path.join(MODEL_PATH, model_name)
         Data.clean_checkpoints(num_keep=3, path=path)

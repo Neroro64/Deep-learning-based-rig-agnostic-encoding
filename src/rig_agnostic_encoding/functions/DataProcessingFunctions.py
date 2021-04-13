@@ -107,7 +107,7 @@ def normaliseN(x:np.ndarray):
 def prepare_data(datasets:list, featureList:list,
                  train_ratio:float=0.8, val_ratio:float=0.2, test_size:int=100, SEED:int=2021):
 
-   # process data
+    # process data
     data = [processData(d, featureList, shutdown=False) for d in datasets]
     # ray.shutdown()
     input_data = [np.vstack(d) for d in data]
@@ -270,14 +270,16 @@ def remote_calc_motion_phases(datafile, id):
         velocities = np.reshape(velocities, (-1, 3, contacts.shape[1]))
         velocities = np.sqrt(np.sum(velocities ** 2, axis=1))
         sin_block_fn = np.sin(normalised_block_fn)
-        phase_vector = sin_block_fn * velocities
+        cos_block_fn = np.cos(normalised_block_fn)
+        sin_vec = sin_block_fn * velocities
+        cos_vec = cos_block_fn * velocities
 
         ttas = calc_tta(contacts)
 
         for i, f in enumerate(d["frames"]):
             for j, jo in enumerate(f):
                 jo["sin_normalised_contact"] = sin_block_fn[j,i]
-                jo["phase_vec"] = phase_vector[j,i]
+                jo["phase_vec"] = np.asarray([sin_vec[j,i], cos_vec[j,i]])
                 jo["tta"] = ttas[j,i]
 
         new_data.append(pickle.dumps(d))
@@ -294,15 +296,17 @@ def calc_motion_phases(datafile):
         velocities = np.reshape(velocities, (-1, 3, contacts.shape[1]))
         velocities = np.sqrt(np.sum(velocities ** 2, axis=1))
         sin_block_fn = np.sin(normalised_block_fn)
-        phase_vector = sin_block_fn * velocities
+        cos_block_fn = np.cos(normalised_block_fn)
+        sin_vec = sin_block_fn * velocities
+        cos_vec = cos_block_fn * velocities
 
         ttas = calc_tta(contacts)
 
         for i, f in enumerate(d["frames"]):
             for j, jo in enumerate(f):
-                jo["sin_normalised_contact"] = sin_block_fn[j,i]
-                jo["phase_vec"] = phase_vector[j,i]
-                jo["tta"] = ttas[j,i]
+                jo["sin_normalised_contact"] = sin_block_fn[j, i]
+                jo["phase_vec"] = np.asarray([sin_vec[j, i], cos_vec[j, i]])
+                jo["tta"] = ttas[j, i]
 
         new_data.append(pickle.dumps(d))
     return new_data

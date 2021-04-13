@@ -5,12 +5,52 @@ import numpy as np
 import functions.DataProcessingFunctions as Data
 import functions.LossFunctions as Loss
 from itertools import combinations_with_replacement
+import time
+
+def test_single_model(model, model_path, data_path,
+                               save=True, save_path=""):
+    model = model.load_checkpoint(model_path)
+    test_data = Data.load(data_path)["data"][0]
+    N = len(test_data)
+    print(model, N)
+    with torch.no_grad():
+        recon_errors = np.zeros(N)
+
+        for i, (x, y) in enumerate(test_data):
+                    # models[j].to("cpu")
+                    # h1, l1, mu1, logvar1 = models[i].encode(x1)
+                    # start_time = time.time()
+                    # h2, l2, mu2, logvar2 = models[j].encode(x2)
+                    # time1 = time.time() - start_time
+                    #
+                    # # out11, _, _, _ = models[i].decode(h1, l1, mu1, logvar1)
+                    # # out12, _, _, _ = models[i].decode(h2, l1, mu2, logvar2)
+                    # start_time = time.time()
+                    # out22, _, _, _ = models[j].decode(h2, l2, mu2, logvar2)
+                    # time2 = time.time() - start_time
+                    #
+                    # print(models[j])
+                    # print("time 1: ", time1)
+                    # print("time 2:", time2)
+                    # return
+                    # out21, _, _, _ = models[j].decode(h1, l2, mu1, logvar1)
+                    h, l = model.encode(x)
+                    out = model.decode(h, l)
+
+                    recon_loss = Loss.mse_loss(out,y)
+                    recon_errors[i] = recon_loss
+
+    if save:
+        if not os.path.exists(save_path): os.mkdir(save_path)
+        recon_df = pd.DataFrame(data=recon_errors, index=np.arange(N))
+        recon_df.to_csv(model.name + "_recon_error.csv")
 
 def test_recon_error_withLabel(mix_model, model, model_path, data_path,
                                save=True, save_path=""):
     M = mix_model.load_checkpoint(model, model_path)
     models = [M.model1, M.model2, M.model3, M.model4]
     test_data = Data.load(data_path)["data"]
+
     with torch.no_grad():
         recon_error_matrix = np.zeros((4,4))
         latent_error_matrix = np.zeros((4,4))
@@ -24,6 +64,7 @@ def test_recon_error_withLabel(mix_model, model, model_path, data_path,
 
                     out11 = models[i].decode(h1, l1)
                     out12 = models[i].decode(h2, l1)
+
                     out22 = models[j].decode(h2, l2)
                     out21 = models[j].decode(h1, l2)
 
@@ -59,6 +100,7 @@ def test_recon_error(mix_model, model, model_path, data_path,
         for (i, j) in pairs:
             for x1, y1 in test_data[i]:
                 for x2, y2 in test_data[j]:
+
                     h1 = models[i].encode(x1)
                     h2 = models[j].encode(x2)
 

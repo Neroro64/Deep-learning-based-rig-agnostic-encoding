@@ -24,8 +24,8 @@ import torch.nn.functional as f
 
 def main(argv):
     n_samples = 10
-    model = [MIX4_withLabel, MLP_withLabel]
-    model_name = "MLP4_withLabel_best"
+    # model = [MIX4_withLabel, MLP_withLabel]
+    # model_name = "MLP4_withLabel_best"
     # model = [MIX4_withLabel, RBF_withLabel]
     # model_name = "RBF4_withLabel"
     # model = [MIX4_withLabel, DEC_withLabel]
@@ -35,8 +35,8 @@ def main(argv):
     # model = [MIX4_withLabel_prob, VAE_withLabel]
     # model_name = "VAE4_withLabel_best"
 
-    # model = [MIX4, MLP]
-    # model_name = "MLP4"
+    model = [MLP_withLabel]
+    model_name = "MLP_withLabel"
 
 
 
@@ -70,16 +70,19 @@ def main(argv):
     # config = get_config_vae()
 
     # withLabel
-    Training.train_multi_model_withLabel(model=model, datapaths=[datapath1,datapath2,datapath3,datapath4],
-                                        featureList=featureList, config=config,
-                                        extra_feature_len=extra_feature_len, extra_feature_len2=extra_feature_len2,
-                                        n_samples=n_samples, n_epochs=800, model_name=model_name)
+    # Training.train_multi_model_withLabel(model=model, datapaths=[datapath1,datapath2,datapath3,datapath4],
+    #                                     featureList=featureList, config=config,
+    #                                     extra_feature_len=extra_feature_len, extra_feature_len2=extra_feature_len2,
+    #                                     n_samples=n_samples, n_epochs=800, model_name=model_name)
 
     # without label
     # Training.train_multi_model(model=model, datapaths=[datapath1,datapath2,datapath3,datapath4],
     #                                     featureList=featureList, config=config,
     #                                     n_samples=n_samples, model_name=model_name)
 
+    Training.train_single_model_withLabel(model=model, datapaths=[datapath3], extra_feature_len=extra_feature_len,
+                                featureList=featureList, config=config, n_epochs=300, n_samples=30,
+                                model_name=model_name)
 
 def get_config_mlp():
     return {
@@ -142,6 +145,8 @@ def get_config_vae():
         "ae_loss_fn": tune.choice([Loss.mse_loss]),
         "activation" : tune.choice([nn.ELU]),
     }
+
+
 
 
 if __name__ == "__main__":
