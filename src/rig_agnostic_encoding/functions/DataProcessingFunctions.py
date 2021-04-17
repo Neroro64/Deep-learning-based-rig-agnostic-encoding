@@ -283,8 +283,6 @@ def remote_calc_motion_phases(datafile, id):
                 jo["tta"] = ttas[j,i]
 
         new_data.append(pickle.dumps(d))
-        del d, contacts, velocities, normalised_block_fn, sin_block_fn, phase_vector, ttas
-    del datafile
     return new_data, id
 
 def calc_motion_phases(datafile):

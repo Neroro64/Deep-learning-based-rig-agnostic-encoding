@@ -237,3 +237,41 @@ def test_recon_error_withProb(mix_model, model, model_path, data_path,
         latent_df.to_csv(M.name + "_latent_error.csv")
         error_df.to_csv(M.name + "_error.csv")
         kl_df.to_csv(M.name + "_kl_error.csv")
+
+def test_generation_model(model, model_path, data_path,
+                               save=True, save_path=""):
+    model = model.load_checkpoint(model_path)
+    test_data = Data.load(data_path)["data"][0]
+    N = len(test_data)
+    print(model, N)
+    with torch.no_grad():
+        recon_errors = np.zeros(N)
+
+        for i, (x, y) in enumerate(test_data):
+                    # models[j].to("cpu")
+                    # h1, l1, mu1, logvar1 = models[i].encode(x1)
+                    # start_time = time.time()
+                    # h2, l2, mu2, logvar2 = models[j].encode(x2)
+                    # time1 = time.time() - start_time
+                    #
+                    # # out11, _, _, _ = models[i].decode(h1, l1, mu1, logvar1)
+                    # # out12, _, _, _ = models[i].decode(h2, l1, mu2, logvar2)
+                    # start_time = time.time()
+                    # out22, _, _, _ = models[j].decode(h2, l2, mu2, logvar2)
+                    # time2 = time.time() - start_time
+                    #
+                    # print(models[j])
+                    # print("time 1: ", time1)
+                    # print("time 2:", time2)
+                    # return
+                    # out21, _, _, _ = models[j].decode(h1, l2, mu1, logvar1)
+                    h, l = model.encode(x)
+                    out = model.decode(h, l)
+
+                    recon_loss = Loss.mse_loss(out,y)
+                    recon_errors[i] = recon_loss
+
+    if save:
+        if not os.path.exists(save_path): os.mkdir(save_path)
+        recon_df = pd.DataFrame(data=recon_errors, index=np.arange(N))
+        recon_df.to_csv(model.name + "_recon_error.csv")
