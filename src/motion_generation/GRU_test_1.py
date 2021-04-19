@@ -362,96 +362,53 @@ class MLP(pl.LightningModule):
 
 
 
-class MoE(nn.Module):
-    def __init__(self, config=None, dimensions=None, phase_input_dim:int=0, gate_size=0, name="model", load=False):
+class RNN(nn.Module):
+    def __init__(self, config=None, dimensions=None, hidden_dim=128,
+                 batch_size=1, keep_prob=.2, num_layers=1,
+                 name="model", load=False, device='cuda'):
         super().__init__()
 
-        self.phase_input_dim = phase_input_dim
         self.dimensions = dimensions
         self.act_fn = nn.ELU
         self.name = name
         self.config=config
-        self.gate_size=gate_size
+        self.keep_prob = keep_prob
+        self.batch_size=batch_size
+        self.num_layers = num_layers
+        self.hidden_dim = hidden_dim
+        self.device = device
         if not load:
-            self.k_experts = config["k_experts"]
-            self.gate_size = config["gate_size"]
             self.keep_prob = config["keep_prob"]
-            self.dimensions = [self.dimensions[0], config["hidden_dim"], config["hidden_dim"], self.dimensions[-1]]
+            self.hidden_dim = config["hidden_dim"]
+            self.num_layers = config["num_layers"]
+            # self.batch_size = config["batch_size"]
+            self.dimensions = [self.dimensions[0], config["hidden_dim"], self.dimensions[-1]]
 
-        self.layers = []
+        self.rnn = nn.GRU(input_size=self.dimensions[0], hidden_size=self.hidden_dim,
+                           num_layers=self.num_layers, dropout=self.keep_prob, batch_first=True)
+        self.decoder = nn.Linear(in_features=self.hidden_dim, out_features=dimensions[-1])
 
-        self.build()
-        self.gate = nn.Sequential(
-            nn.Linear(phase_input_dim, self.gate_size),
-            self.act_fn(),
-            nn.Linear(self.gate_size, self.gate_size),
-            self.act_fn(),
-            nn.Linear(self.gate_size, self.k_experts)
-        )
-        self.init_params()
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        self.reset_hidden()
+        h_t, h_n = self.rnn(x, self.hidden)
+        self.hidden = h_n
+        return self.decoder(h_t)
 
-
-
-    def forward(self, x:torch.Tensor, phase) -> torch.Tensor:
-        coefficients = F.softmax(self.gate(phase), dim=1)
-        layer_out = x
-        for (weight, bias, activation) in self.layers:
-            if weight is None:
-                layer_out = activation(layer_out, p=self.keep_prob)
-            else:
-                flat_weight = weight.flatten(start_dim=1, end_dim=2)
-                mixed_weight = torch.matmul(coefficients, flat_weight).view(
-                    coefficients.shape[0], *weight.shape[1:3]
-                )
-                input = layer_out.unsqueeze(1)
-                mixed_bias = torch.matmul(coefficients, bias).unsqueeze(1)
-                out = torch.baddbmm(mixed_bias, input, mixed_weight).squeeze(1)
-                layer_out = activation(out) if activation is not None else out
-        return layer_out
-
-    def build(self):
-        layers = []
-        for i, size in enumerate(zip(self.dimensions[0:], self.dimensions[1:])):
-            if i < len(self.dimensions) - 2:
-                layers.append(
-                    (
-                        nn.Parameter(torch.empty(self.k_experts, size[0], size[1])),
-                        nn.Parameter(torch.empty(self.k_experts, size[1])),
-                        self.act_fn()
-                    )
-                )
-                if self.keep_prob > 0:
-                    layers.append((None, None, F.dropout))
-            else:
-                layers.append(
-                    (
-                        nn.Parameter(torch.empty(self.k_experts, size[0], size[1])),
-                        nn.Parameter(torch.empty(self.k_experts, size[1])),
-                        None
-                    )
-                )
-
-
-        self.layers = layers
-
-    def init_params(self):
-        for i, (w, b, _) in enumerate(self.layers):
-            if w is None:
-                continue
-
-            i = str(i)
-            torch.nn.init.kaiming_uniform_(w)
-            b.data.fill_(0.01)
-            self.register_parameter("w" + i, w)
-            self.register_parameter("b" + i, b)
-
+    def reset_hidden(self):
+        hidden_state = torch.autograd.Variable(torch.randn(self.num_layers, self.batch_size, self.hidden_dim, device="cuda"))
+        # cell_state = torch.autograd.Variable(torch.randn(self.num_layers, self.batch_size, self.hidden_dim, device="cuda"))
+        # self.hidden = (hidden_state, cell_state)
+        self.hidden = hidden_state
     def save_checkpoint(self, best_val_loss:float=np.inf, checkpoint_dir=MODEL_PATH):
 
         model = {"dimensions":self.dimensions,
                  "name":self.name,
-                 "gate":self.gate.state_dict(), "phase_input_dim":self.phase_input_dim,
-                 "generationNetwork":self.state_dict(),
-                 "gate_size":self.gate_size,
+                 "hidden_dim":self.hidden_dim,
+                 "keep_prob":self.keep_prob,
+                 "num_layers":self.num_layers,
+                 "batch_size":self.batch_size,
+                 "rnn":self.rnn.state_dict(),
+                 "decoder":self.decoder.state_dict(),
                  }
 
         if not os.path.exists(checkpoint_dir):
@@ -470,17 +427,15 @@ class MoE(nn.Module):
         with bz2.BZ2File(filePath, "rb") as f:
             obj = pickle.load(f)
 
-        model = MoE(name=obj["name"], dimensions=obj["dimensions"], gate_size=obj["gate_size"],
-                    phase_input_dim=obj["phase_input_dim"])
-        model.gate.load_state_dict(obj["gate"])
-        model.load_state_dict(obj["generationNetwork"])
+        model = RNN(name=obj["name"], dimensions=obj["dimensions"], hidden_dim=obj["hidden_dim"],
+                    keep_prob=obj["keep_prob"], batch_size=obj["batch_size"], num_layers=obj["num_layers"], load=True)
+        model.rnn.load_state_dict(obj["rnn"])
+        model.decoder.load_state_dict(obj["decoder"])
         return model
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.99)
-        return [optimizer], [scheduler]
-
+        return optimizer
 
 
 
@@ -492,29 +447,35 @@ class MotionGenerationModel(pl.LightningModule):
         if not load:
             self.pose_autoencoder = pose_autoencoder # start with 3
             cost_hidden_dim = config["cost_hidden_dim"]
-            self.cost_encoder = MLP(dimensions=[cost_input_dimension, cost_hidden_dim, cost_hidden_dim],
+            cost_output_dim = config["cost_output_dim"]
+            self.cost_encoder = MLP(dimensions=[cost_input_dimension, cost_hidden_dim, cost_hidden_dim, cost_output_dim],
                                     name="CostEncoder", load=True, single_module=-1)
 
 
             phase_dim = input_slicers[0]
-            moe_input_dim = pose_autoencoder.dimensions[-1] + cost_hidden_dim
-            moe_output_dim = pose_autoencoder.dimensions[-1] + phase_dim*2
-            self.generationModel =  MoE(config=config, dimensions=[moe_input_dim, moe_output_dim], phase_input_dim=phase_dim,
-                                        name="MixtureOfExperts")
+            moe_input_dim = pose_autoencoder.dimensions[-1] + phase_dim + cost_output_dim
+            moe_output_dim = pose_autoencoder.dimensions[-1] + pose_autoencoder.extra_feature_len + phase_dim * 2 + cost_input_dimension
+            self.generationModel = RNN(config=config, dimensions=[moe_input_dim, moe_output_dim], device=self.device,
+                                        batch_size=2*config["batch_size"],name="GRU")
+
+                                            # (120 * config["batch_size"]) / config["autoregress_chunk_size"]) - 1 *
+                                            #        config["batch_size"],
+
+
             # self.batch_norm = nn.BatchNorm1d(np.sum())
 
-            # self.in_slices = [0] + list(accumulate(add, input_slicers))
-            self.in_slices = input_slicers
-            # self.out_slices = [0] + list(accumulate(add, output_slicers))
-            self.out_slices = output_slicers
+            self.in_slices = [0] + list(accumulate(add, input_slicers))
+            # self.in_slices = input_slicers
+            self.out_slices = [0] + list(accumulate(add, output_slicers))
+            # self.out_slices = output_slicers
 
             self.config=config
             self.batch_size = config["batch_size"]
             self.learning_rate = config["lr"]
             self.loss_fn = config["loss_fn"]
-            self.window_size = config["window_size"]
-            self.autoregress_prob = config["autoregress_prob"]
-            self.autoregress_inc = config["autoregress_inc"]
+            self.autoregress_chunk_size = config["autoregress_chunk_size"]
+            # self.autoregress_prob = config["autoregress_prob"]
+            # self.autoregress_inc = config["autoregress_inc"]
             self.best_val_loss = np.inf
             self.phase_smooth_factor = 0.9
 
@@ -525,36 +486,55 @@ class MotionGenerationModel(pl.LightningModule):
 
 
     def forward(self, x):
-        x=torch.squeeze(x,dim=0)
-        # x_tensors = [x[:, d0:d1] for d0, d1 in zip(self.in_slices[:-1], self.in_slices[1:])]
-        x_tensors = torch.split(x, self.in_slices, dim=1)
+        x_tensors = [torch.reshape(x[:, :, d0:d1], (-1, d1-d0)) for d0, d1 in zip(self.in_slices[:-1], self.in_slices[1:])]
         pose_h, pose_label = self.pose_autoencoder.encode(x_tensors[1])
-        cost_out =self.cost_encoder(x_tensors[2])
-        embedding = torch.cat((pose_h, cost_out), dim=1)
-        out = self.generationModel(embedding, x_tensors[0])
-        # out_tensors = [out[:, d0:d1] for d0, d1 in zip(self.out_slices[:-1], self.out_slices[1:])] # phase, phase_update, pose
-        out_tensors = torch.split(out, self.out_slices, dim=1)
+
+        embedding = torch.cat([x_tensors[0], pose_h, self.cost_encoder(x_tensors[2])], dim=1)
+        embedding = torch.reshape(embedding, (-1, x.size()[1], embedding.size()[-1]))
+        out = self.generationModel(embedding)
+        out_tensors = [torch.reshape(out[:, :, d0:d1], (-1, d1-d0)) for d0, d1 in zip(self.out_slices[:-1], self.out_slices[1:])] # phase, phase_update, pose
 
         phase = self.update_phase(x_tensors[0], out_tensors[0], out_tensors[1]) # phase_0, phase_1, phase_update
         new_pose = self.pose_autoencoder.decode(out_tensors[2], pose_label)
-
-        out2 = torch.cat((phase, new_pose), dim=1)
-        # out = self.batch_norm(out)
-        return out2
+        output = torch.cat([phase, new_pose],dim=1)
+        return output
 
     def training_step(self, batch, batch_idx):
         x, y = batch
-        out = self(x)
-        loss = self.loss_fn(out, y)
-        self.log("ptl/train_loss", loss)
+        seq = int(x.size()[1] / 2)
+        x_chunks = [x[:, :seq, :], x[:, seq:-1, :]]
+        y_chunks = [y[:, :seq, :], y[:, seq:-1, :]]
+
+        x_chunks = torch.cat(x_chunks, dim=0)
+        y_chunks = torch.cat(y_chunks, dim=0)
+
+        loss = 0
+        out = self(x_chunks)
+        # out = torch.reshape(out, (-1, out.size()[-1]))
+        y_chunks = torch.reshape(y_chunks, (-1, y_chunks.size()[-1]))
+        loss += self.loss_fn(out, y_chunks)
+
         return loss
 
     def validation_step(self, batch, batch_idx):
         x,y = batch
 
-        out = self(x)
-        loss = self.loss_fn(out, y)
+        seq = int(x.size()[1] / 2)
+        x_chunks = [x[:, :seq, :], x[:, seq:-1, :]]
+        y_chunks = [y[:, :seq, :], y[:, seq:-1, :]]
+        # y_chunks = torch.split(y, seq, dim=1)
+
+        x_chunks = torch.cat(x_chunks, dim=0)
+        y_chunks = torch.cat(y_chunks, dim=0)
+
+        loss = 0
+        out = self(x_chunks)
+        # out = torch.reshape(out, (-1, out.size()[-1]))
+        y_chunks = torch.reshape(y_chunks, (-1, y_chunks.size()[-1]))
+        loss += self.loss_fn(out, y_chunks)
+
         self.log("ptl/val_loss", loss, prog_bar=True)
+
         return {"val_loss":loss}
 
     def validation_epoch_end(self, outputs):
@@ -563,6 +543,7 @@ class MotionGenerationModel(pl.LightningModule):
         if avg_loss < self.best_val_loss:
             self.best_val_loss = avg_loss
             self.save_checkpoint()
+
 
     def save_checkpoint(self, checkpoint_dir=MODEL_PATH):
         path = os.path.join(checkpoint_dir, self.name)
@@ -586,6 +567,7 @@ class MotionGenerationModel(pl.LightningModule):
                                       str(loss)+".pbz2"), "w") as f:
             pickle.dump(model, f)
 
+
     @staticmethod
     def load_checkpoint(filename, pose_ae_model, cost_encoder_model, generation_model):
         with bz2.BZ2File(filename, "rb") as f:
@@ -608,141 +590,172 @@ class MotionGenerationModel(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.99)
-        return [optimizer],[scheduler]
+        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.99)
+        return optimizer
 
     def train_dataloader(self):
-        return DataLoader(self.train_set, batch_size=self.batch_size, pin_memory=True)
+        return DataLoader(self.train_set, batch_size=self.batch_size, pin_memory=True, num_workers=4)
 
     def val_dataloader(self):
-        return DataLoader(self.val_set, batch_size=self.batch_size, pin_memory=True)
+        return DataLoader(self.val_set, batch_size=self.batch_size, pin_memory=True, num_workers=4)
 
     def test_dataloader(self):
-        return DataLoader(self.test_set, batch_size=self.batch_size, pin_memory=True)
+        return DataLoader(self.test_set, batch_size=self.batch_size, pin_memory=True, num_workers=4)
 
-
-
-
-
-data_path = ["/home/nuoc/Documents/MEX/data/ONE_R2-default-One.pbz2",
-             "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-large.pbz2",
-             "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-small.pbz2"
-             ]
+data_path = [
+        "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two.pbz2",
+         "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two-small.pbz2",
+         "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two-large.pbz2",
+        "/home/nuoc/Documents/MEX/data/ONE_R2-default-One.pbz2",
+         "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-large.pbz2",
+         "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-small.pbz2",
+         "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two.pbz2",
+         "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two-large.pbz2",
+         "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two-small.pbz2",
+            ]
 
 
 
 pose_features = ["pos", "rotMat", "velocity", "isLeft", "chainPos", "geoDistanceNormalised"]
-cost_features = ["posCost", "rotCost", "targetPosition", "targetRotation","contact"]
-phase_features = ["phase_vec"]
+cost_features = ["posCost", "rotCost", "contact"]
+phase_features = ["phase_vec", "targetPosition", "targetRotation"]
 
 
 
+#
+# def load(file_path):
+#     with bz2.BZ2File(file_path, "rb") as f:
+#         obj = pickle.load(f)
+#         return obj
+#
+# data = [load(path) for path in data_path]
+#
+#
+#
+# data_tensors = []
+#
+# data_dims = []
+# feature_list = []
+#
+# first_row = True
+# first_time = True
+#
+# for Data in data:
+#     for clip in Data:
+#         d = pickle.loads(clip)
+#         sequence = []
+#         n_frames = len(d["frames"])
+#         if first_time:
+#             key_joints = [i for i in range(len(d["frames"][0])) if d["frames"][0][i]["key"]]
+#             first_time = False
+#         for f, frame in enumerate(d["frames"]):
+#             row_vec = []
+#             for feature in phase_features:
+#                 if feature == "phase_vec":
+#                     sin = np.asarray([frame[i]["phase_vec"] for i in key_joints])
+#                     vel = np.concatenate([frame[i]["velocity"] for i in key_joints])
+#                     vel = np.reshape(vel, (3,-1))
+#                     vel = np.sqrt(np.sum(vel**2, axis=0))
+#                     cos = np.cos(np.arcsin(np.asarray([frame[i]["sin_normalised_contact"] for i in key_joints])))
+#                     cos = cos * vel
+#                     row_vec.append(np.concatenate([np.asarray([sin[i], cos[i]]) for i in range(len(sin))]))
+#                 elif feature == "targetRotation":
+#                     row_vec.append(np.concatenate([frame[jj][feature].ravel() for jj in key_joints]))
+#                 else:
+#                     row_vec.append(np.concatenate([frame[jj][feature] for jj in key_joints]))
+#
+#                 if first_row:
+#                     data_dims.append(row_vec[-1].shape)
+#                     feature_list.append(feature)
+#             for feature in pose_features:
+#                 if feature=="rotMat":
+#                     row_vec.append(np.concatenate([jo["rotMat"].ravel() for jo in frame]))
+#                 elif feature == "isLeft" or feature == "chainPos" or feature == "geoDistanceNormalised":
+#                     row_vec.append(np.concatenate([[jo[feature]] for jo in frame]))
+#                 else:
+#                     row_vec.append(np.concatenate([jo[feature] for jo in frame]))
+#                 if first_row:
+#                     data_dims.append(row_vec[-1].shape)
+#                     feature_list.append(feature)
+#
+#             for feature in cost_features:
+#                 if feature == "contact":
+#                     row_vec.append(np.asarray([frame[jj]["contact"] for jj in key_joints]))
+#                 elif feature == "posCost" or feature == "rotCost":
+#                     row_vec.append(np.concatenate([frame[jj][feature] for jj in key_joints]))
+#                 elif feature == "tPos" or feature == "tRot":
+#                     feature = "pos" if feature == "tPos" else "rotMat"
+#                     row_vec.append(np.concatenate([frame[jj][feature].ravel() for jj in key_joints]))
+#                 elif feature == "targetRotation":
+#                     row_vec.append(np.concatenate([frame[jj][feature].ravel() for jj in key_joints]))
+#
+#                 else:
+#                     row_vec.append(np.concatenate([frame[jj][feature] for jj in key_joints]))
+#
+#                 if first_row:
+#                     data_dims.append(row_vec[-1].shape)
+#                     feature_list.append(feature)
+#             if first_row: first_row = False
+#             sequence.append(np.concatenate(row_vec))
+#         data_tensors.append(np.vstack(sequence))
+#
+#
 
-def load(file_path):
-    with bz2.BZ2File(file_path, "rb") as f:
-        obj = pickle.load(f)
-        return obj
-
-data = [load(path) for path in data_path]
-
-
-
-data_tensors = []
-
-data_dims = []
-feature_list = []
-
-first_row = True
-for Data in data:
-    for clip in Data:
-        d = pickle.loads(clip)
-        sequence = []
-        for frame in d["frames"]:
-            row_vec = []
-            for feature in phase_features:
-                if feature == "phase_vec":
-                    sin = np.asarray([jo["phase_vec"] for jo in frame if jo["key"]])
-                    vel = np.concatenate([jo["velocity"] for jo in frame if jo["key"]])
-                    vel = np.reshape(vel, (3,-1))
-                    vel = np.sqrt(np.sum(vel**2, axis=0))
-                    vel[vel==0] = 1
-                    cos = np.cos(np.arcsin(sin/vel)) * vel
-                    row_vec.append(np.concatenate([np.asarray([sin[i], cos[i]]) for i in range(len(sin))]))
-                else:
-                    row_vec.append(np.asarray([jo[feature] for jo in frame if jo["key"]]))
-
-                if first_row:
-                    data_dims.append(row_vec[-1].shape)
-                    feature_list.append(feature)
-            for feature in pose_features:
-                if feature=="rotMat":
-                    row_vec.append(np.concatenate([jo["rotMat"].ravel() for jo in frame]))
-                elif feature == "isLeft" or feature == "chainPos" or feature == "geoDistanceNormalised":
-                    row_vec.append(np.concatenate([[jo[feature]] for jo in frame]))
-                else:
-                    row_vec.append(np.concatenate([jo[feature] for jo in frame]))
-
-                if first_row:
-                    data_dims.append(row_vec[-1].shape)
-                    feature_list.append(feature)
-            for feature in cost_features:
-                if feature == "contact":
-                    row_vec.append(np.asarray([jo["contact"] for jo in frame if jo["key"]], dtype=np.float32))
-                elif feature == "targetRotation":
-                    row_vec.append(np.concatenate([jo[feature].ravel() for jo in frame if jo["key"]]))
-                else:
-                    row_vec.append(np.concatenate([jo[feature] for jo in frame if jo["key"]]))
-
-                if first_row:
-                    data_dims.append(row_vec[-1].shape)
-                    feature_list.append(feature)
-            if first_row: first_row = False
-            sequence.append(np.concatenate(row_vec))
-        data_tensors.append(np.vstack(sequence))
-
-
-
-
-
+#
+# extra_feature_len = 21 * 3
+# n_phase_features = len(phase_features)
+# n_pose_features = len(pose_features)
+# phase_dim = np.sum(data_dims[0:n_phase_features])
+# pose_dim = np.sum(data_dims[n_phase_features:n_phase_features+n_pose_features])
+# cost_dim = np.sum(data_dims[n_phase_features+n_pose_features:])
+#
+# table = [feature_list, data_dims]
+# print(tabulate(table))
+# print("phase dim: ",phase_dim)
+# print("pose dim: ", pose_dim)
+# print("cost dim: ", cost_dim)
+#
+# x_tensors = torch.stack([normalise(torch.from_numpy(clip[:-1])).float() for clip in data_tensors])
+# y_tensors = torch.stack([torch.from_numpy(clip[1:][:, :-(cost_dim+extra_feature_len)]).float() for clip in data_tensors])
+#
+#
+# print(len(x_tensors), x_tensors[0].shape)
+# print(len(y_tensors), y_tensors[0].shape)
+#
+#
+#
+# dataset = TensorDataset(x_tensors, y_tensors)
+# data_set_len = len(dataset)
+# train_ratio = int(.7 * data_set_len)
+# val_ratio = int((data_set_len - train_ratio) / 2.0)
+# test_ratio = data_set_len - train_ratio - val_ratio
+# train_set, val_set, test_set = random_split(dataset, [train_ratio, val_ratio, test_ratio],
+#                                             generator=torch.Generator().manual_seed(2021))
+# print(len(train_set), len(val_set), len(test_set))
+#
+# data_1 = {"data_sets":[train_set, val_set, test_set], "desc":"phase+pose+cost_single-frame", "dims":[phase_dim, pose_dim, cost_dim]}
+# with bz2.BZ2File("data_sets_1_MoE.pbz2", "w") as f:
+#     pickle.dump(data_1, f)
 def loss_fn(x, y):
     return nn.functional.mse_loss(x,y, reduction="mean")
+
+def loss_fn2(x, y):
+    return nn.functional.smooth_l1_loss(x,y, reduction="mean")
 def normalise(x):
     std = torch.std(x, dim=0)
     std[std==0] = 1
     return (x-torch.mean(x,dim=0)) / std
 
+with bz2.BZ2File("data_sets_1_MoE.pbz2", "rb") as f:
+        obj = pickle.load(f)
 
-
+train_set = obj["data_sets"][0]
+val_set = obj["data_sets"][1]
+# train_set = obj["data_sets"][0]
+phase_dim = obj["dims"][0]
+pose_dim = obj["dims"][1]
+cost_dim = obj["dims"][2]
 extra_feature_len = 21 * 3
-n_phase_features = len(phase_features)
-n_pose_features = len(pose_features)
-phase_dim = np.sum(data_dims[0:n_phase_features])
-pose_dim = np.sum(data_dims[n_phase_features:n_phase_features+n_pose_features])
-cost_dim = np.sum(data_dims[n_phase_features+n_pose_features:])
-
-table = [feature_list, data_dims]
-print(tabulate(table))
-print("phase dim: ",phase_dim)
-print("pose dim: ", pose_dim)
-print("cost dim: ", cost_dim)
-
-x_tensors = torch.stack([normalise(torch.from_numpy(clip[:-1])).float() for clip in data_tensors])
-y_tensors = torch.stack([torch.from_numpy(clip[1:][:, :-(cost_dim+extra_feature_len)]).float() for clip in data_tensors])
-
-
-print(len(x_tensors), x_tensors[0].shape)
-print(len(y_tensors), y_tensors[0].shape)
-
-
-
-dataset = TensorDataset(x_tensors, y_tensors)
-N = len(x_tensors)
-
-train_ratio = int(.7*N)
-val_ratio = int((N-train_ratio) / 2.0)
-train_set, val_set, test_set = random_split(dataset, [train_ratio, val_ratio, val_ratio], generator=torch.Generator().manual_seed(2021))
-print(len(train_set), len(val_set), len(test_set))
-
 
 input_dim = phase_dim + pose_dim + cost_dim
 output_dim = phase_dim + pose_dim-extra_feature_len
@@ -752,15 +765,15 @@ print(output_dim)
 config = {
     "k_experts":tune.choice([1, 2, 4, 8, 10]),
     "gate_size":tune.choice([16, 32, 64, 128]),
-    "keep_prob":tune.choice([.2, .25, .3]),
-    "hidden_dim":tune.choice([16, 32, 64, 128, 256, 512]),
-    "cost_hidden_dim" : tune.choice([16, 32, 64, 128]),
+    "keep_prob":tune.choice([.2]),
+    "hidden_dim":tune.choice([32, 64, 128, 256, 512]),
+    "cost_hidden_dim" : tune.choice([16, 32, 64, 128, 512]),
+    "cost_output_dim" : tune.choice([16, 32, 64, 128, 512]),
     "batch_size":tune.choice([1]),
     "lr":tune.loguniform(1e-3, 1e-8),
-    "loss_fn":tune.choice([loss_fn]),
-    "window_size":tune.choice([1]),
-    "autoregress_prob" : tune.choice([.2]),
-    "autoregress_inc" : tune.choice([.1])
+    "loss_fn":tune.choice([loss_fn, loss_fn2]),
+    "num_layers" : tune.choice([2, 3, 4]),
+    "autoregress_chunk_size" : tune.choice([2, 4, 8, 10, 20, 40])
 }
 
 def tuning(config=None, MODEL=None, pose_autoencoder=None, cost_dim=None, phase_dim=None,
@@ -784,8 +797,8 @@ def tuning(config=None, MODEL=None, pose_autoencoder=None, cost_dim=None, phase_
 
 
 def start_training(name):
-    Epochs = 1000
-    Samples = 50
+    Epochs = 300
+    Samples = 100
     ModelName=name
 
     pose_autoencoder = MLP_withLabel.load_checkpoint("/home/nuoc/Documents/MEX/models/MLP4_withLabel_best/M3/0.00324857.512.pbz2")
@@ -795,7 +808,7 @@ def start_training(name):
 
     scheduler = ASHAScheduler(max_t = Epochs, grace_period=15, reduction_factor=2)
     reporter = CLIReporter(
-        parameter_columns=["k", "lr", "batch_size", "loss_fn"],
+        parameter_columns=list(config.keys()),
         metric_columns=["loss", "training_iteration"],
         max_error_rows=5,
         max_progress_rows=5,
@@ -814,7 +827,7 @@ def start_training(name):
             num_epochs=Epochs,
             model_name=ModelName
         ),
-        resources_per_trial= {"cpu":2, "gpu":1},
+        resources_per_trial= {"cpu":6, "gpu":1},
         metric="loss",
         mode="min",
         config=config,
@@ -835,6 +848,6 @@ def start_training(name):
 
 
 if __name__ == "__main__":
-    model_name = "Test"
+    model_name = "Test2_GRU_pose+phase_single-frame"
     start_training(model_name)
     clean_checkpoints("/home/nuoc/Documents/MEX/models/"+model_name)

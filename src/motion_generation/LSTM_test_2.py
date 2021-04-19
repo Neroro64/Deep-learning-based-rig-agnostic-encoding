@@ -398,7 +398,7 @@ class RNN(nn.Module):
         hidden_state = torch.autograd.Variable(torch.randn(self.num_layers, self.batch_size, self.hidden_dim, device="cuda"))
         cell_state = torch.autograd.Variable(torch.randn(self.num_layers, self.batch_size, self.hidden_dim, device="cuda"))
         self.hidden = (hidden_state, cell_state)
-
+        # self.hidden = hidden_state
     def save_checkpoint(self, best_val_loss:float=np.inf, checkpoint_dir=MODEL_PATH):
 
         model = {"dimensions":self.dimensions,
@@ -438,6 +438,7 @@ class RNN(nn.Module):
         return optimizer
 
 
+
 class MotionGenerationModel(pl.LightningModule):
     def __init__(self, config:dict=None, pose_autoencoder=None, cost_input_dimension=None, phase_dim=0,
                  input_slicers:list=None, output_slicers:list=None, train_set=None, val_set=None, name="model", load=False):
@@ -450,33 +451,37 @@ class MotionGenerationModel(pl.LightningModule):
             self.cost_encoder = MLP(dimensions=[cost_input_dimension, cost_hidden_dim, cost_hidden_dim, cost_output_dim],
                                     name="CostEncoder", load=True, single_module=-1)
 
+
             phase_dim = input_slicers[0]
             moe_input_dim = pose_autoencoder.dimensions[-1] + phase_dim + cost_output_dim
-            moe_output_dim = pose_autoencoder.dimensions[-1] + pose_autoencoder.extra_feature_len + phase_dim*2 + cost_input_dimension
-            self.generationModel =  RNN(config=config, dimensions=[moe_input_dim, moe_output_dim], device=self.device,
-                                        batch_size=int(
-                                            (120 * config["batch_size"]) / config["autoregress_chunk_size"]) - 1 *
-                                                   config["batch_size"],
-                                        name="LSTM")
+            moe_output_dim = pose_autoencoder.dimensions[-1] + pose_autoencoder.extra_feature_len + phase_dim * 2 + cost_input_dimension
+            self.generationModel = RNN(config=config, dimensions=[moe_input_dim, moe_output_dim], device=self.device,
+                                        batch_size=2*config["batch_size"],name="GRU")
+
+                                            # (120 * config["batch_size"]) / config["autoregress_chunk_size"]) - 1 *
+                                            #        config["batch_size"],
+
+
+            # self.batch_norm = nn.BatchNorm1d(np.sum())
 
             self.in_slices = [0] + list(accumulate(add, input_slicers))
+            # self.in_slices = input_slicers
             self.out_slices = [0] + list(accumulate(add, output_slicers))
+            # self.out_slices = output_slicers
 
             self.config=config
             self.batch_size = config["batch_size"]
             self.learning_rate = config["lr"]
             self.loss_fn = config["loss_fn"]
-            self.window_size = config["window_size"]
             self.autoregress_chunk_size = config["autoregress_chunk_size"]
             # self.autoregress_prob = config["autoregress_prob"]
-            self.autoregress_inc = config["autoregress_inc"]
+            # self.autoregress_inc = config["autoregress_inc"]
             self.best_val_loss = np.inf
             self.phase_smooth_factor = 0.9
 
         self.train_set = train_set
         self.val_set = val_set
         self.name = name
-        self.epochs = 0
 
 
 
@@ -485,63 +490,60 @@ class MotionGenerationModel(pl.LightningModule):
         pose_h, pose_label = self.pose_autoencoder.encode(x_tensors[1])
 
         embedding = torch.cat([x_tensors[0], pose_h, self.cost_encoder(x_tensors[2])], dim=1)
-        embedding = torch.reshape(embedding, (-1, self.autoregress_chunk_size, embedding.size()[-1]))
+        embedding = torch.reshape(embedding, (-1, x.size()[1], embedding.size()[-1]))
         out = self.generationModel(embedding)
         out_tensors = [torch.reshape(out[:, :, d0:d1], (-1, d1-d0)) for d0, d1 in zip(self.out_slices[:-1], self.out_slices[1:])] # phase, phase_update, pose
 
         phase = self.update_phase(x_tensors[0], out_tensors[0], out_tensors[1]) # phase_0, phase_1, phase_update
         new_pose = self.pose_autoencoder.decode(out_tensors[2], pose_label)
-        output = torch.cat([phase, new_pose, pose_label, out_tensors[-1]],dim=1)
-        return torch.reshape(output,(-1, self.autoregress_chunk_size, output.size()[-1]))
+        output = torch.cat([phase, new_pose],dim=1)
+        return output
 
     def training_step(self, batch, batch_idx):
         x, y = batch
+        seq = int(x.size()[1] / 2)
+        x_chunks = [x[:, :seq, :], x[:, seq:-1, :]]
+        y_chunks = [y[:, :seq, :], y[:, seq:-1, :]]
 
-        x_chunks = torch.split(x, self.autoregress_chunk_size, dim=1)
-        y_chunks = torch.split(y, self.autoregress_chunk_size, dim=1)
-
-        x_chunks = torch.cat(x_chunks[:-1], dim=0)
-        y_chunks = torch.cat(y_chunks[:-1], dim=0)
+        x_chunks = torch.cat(x_chunks, dim=0)
+        y_chunks = torch.cat(y_chunks, dim=0)
 
         loss = 0
-        # for x_c, y_c in zip(x_chunks, y_chunks):
         out = self(x_chunks)
-        out = torch.reshape(out, (-1, out.size()[-1]))
+        # out = torch.reshape(out, (-1, out.size()[-1]))
         y_chunks = torch.reshape(y_chunks, (-1, y_chunks.size()[-1]))
         loss += self.loss_fn(out, y_chunks)
 
-
-        self.log("ptl/train_loss", loss)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, y = batch
+        x,y = batch
 
-        x_chunks = torch.split(x, self.autoregress_chunk_size, dim=1)
-        y_chunks = torch.split(y, self.autoregress_chunk_size, dim=1)
+        seq = int(x.size()[1] / 2)
+        x_chunks = [x[:, :seq, :], x[:, seq:-1, :]]
+        y_chunks = [y[:, :seq, :], y[:, seq:-1, :]]
+        # y_chunks = torch.split(y, seq, dim=1)
 
-        x_chunks = torch.cat(x_chunks[:-1], dim=0)
-        y_chunks = torch.cat(y_chunks[:-1], dim=0)
+        x_chunks = torch.cat(x_chunks, dim=0)
+        y_chunks = torch.cat(y_chunks, dim=0)
 
         loss = 0
         out = self(x_chunks)
-        out = torch.reshape(out, (-1, out.size()[-1]))
+        # out = torch.reshape(out, (-1, out.size()[-1]))
         y_chunks = torch.reshape(y_chunks, (-1, y_chunks.size()[-1]))
         loss += self.loss_fn(out, y_chunks)
 
         self.log("ptl/val_loss", loss, prog_bar=True)
+
         return {"val_loss":loss}
 
     def validation_epoch_end(self, outputs):
-        # if self.epochs > 0 and self.epochs % 50==0:
-        #     self.autoregress_chunk_size = int(min(120, self.autoregress_chunk_size*self.autoregress_inc))
-        # self.epochs += 1
-
         avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
         self.log("avg_val_loss", avg_loss)
         if avg_loss < self.best_val_loss:
             self.best_val_loss = avg_loss
             self.save_checkpoint()
+
 
     def save_checkpoint(self, checkpoint_dir=MODEL_PATH):
         path = os.path.join(checkpoint_dir, self.name)
@@ -565,6 +567,7 @@ class MotionGenerationModel(pl.LightningModule):
                                       str(loss)+".pbz2"), "w") as f:
             pickle.dump(model, f)
 
+
     @staticmethod
     def load_checkpoint(filename, pose_ae_model, cost_encoder_model, generation_model):
         with bz2.BZ2File(filename, "rb") as f:
@@ -587,36 +590,39 @@ class MotionGenerationModel(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
+        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.99)
         return optimizer
 
     def train_dataloader(self):
-        return DataLoader(self.train_set, batch_size=self.batch_size, pin_memory=True, num_workers=12)
+        return DataLoader(self.train_set, batch_size=self.batch_size, pin_memory=True, num_workers=4)
 
     def val_dataloader(self):
-        return DataLoader(self.val_set, batch_size=self.batch_size, pin_memory=True,num_workers=12)
+        return DataLoader(self.val_set, batch_size=self.batch_size, pin_memory=True, num_workers=4)
 
     def test_dataloader(self):
-        return DataLoader(self.test_set, batch_size=self.batch_size, pin_memory=True, num_workers=12)
-
-
-
+        return DataLoader(self.test_set, batch_size=self.batch_size, pin_memory=True, num_workers=4)
 
 data_path = [
-             "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two.pbz2",
-             "/home/nuoc/Documents/MEX/data/ONE_R2-default-One.pbz2",
-             "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-large.pbz2",
-             "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-small.pbz2",
-             "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two-small.pbz2",
-             "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two-large.pbz2",
-             "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two.pbz2",
-             "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two-large.pbz2",
-             "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two-small.pbz2",
-             ]
+        "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two.pbz2",
+         "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two-small.pbz2",
+         "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two-large.pbz2",
+        "/home/nuoc/Documents/MEX/data/ONE_R2-default-One.pbz2",
+         "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-large.pbz2",
+         "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-small.pbz2",
+         "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two.pbz2",
+         "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two-large.pbz2",
+         "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two-small.pbz2",
+            ]
+
+
 
 pose_features = ["pos", "rotMat", "velocity", "isLeft", "chainPos", "geoDistanceNormalised"]
-cost_features = ["tPos", "tRot", "posCost", "rotCost", "contact", "targetPosition", "targetRotation"]
-phase_features = ["phase_vec"]
+cost_features = ["posCost", "rotCost", "contact"]
+phase_features = ["phase_vec", "targetPosition", "targetRotation"]
 
+
+
+#
 # def load(file_path):
 #     with bz2.BZ2File(file_path, "rb") as f:
 #         obj = pickle.load(f)
@@ -624,9 +630,7 @@ phase_features = ["phase_vec"]
 #
 # data = [load(path) for path in data_path]
 #
-# window_size = 6
-# frame_window = 30
-# sampling_step = frame_window / window_size
+#
 #
 # data_tensors = []
 #
@@ -635,10 +639,7 @@ phase_features = ["phase_vec"]
 #
 # first_row = True
 # first_time = True
-# key_joints = []
 #
-# a = []
-# b = []
 # for Data in data:
 #     for clip in Data:
 #         d = pickle.loads(clip)
@@ -649,26 +650,23 @@ phase_features = ["phase_vec"]
 #             first_time = False
 #         for f, frame in enumerate(d["frames"]):
 #             row_vec = []
-#             f_idx = np.arange(f-frame_window, f+frame_window, sampling_step, dtype=int)
-#             f_idx[f_idx < 0] = 0
-#             f_idx[f_idx >= n_frames] = n_frames-1
-#             f_idx = f_idx.tolist()
 #             for feature in phase_features:
 #                 if feature == "phase_vec":
-#                     sin = np.asarray([d["frames"][idx][jj]["phase_vec"] for jj in key_joints for idx in f_idx])
-#                     vel = np.concatenate([d["frames"][idx][jj]["velocity"] for jj in key_joints for idx in f_idx])
+#                     sin = np.asarray([frame[i]["phase_vec"] for i in key_joints])
+#                     vel = np.concatenate([frame[i]["velocity"] for i in key_joints])
 #                     vel = np.reshape(vel, (3,-1))
 #                     vel = np.sqrt(np.sum(vel**2, axis=0))
-#                     cos = np.cos(np.arcsin(np.asarray([d["frames"][idx][jj]["sin_normalised_contact"] for jj in key_joints for idx in f_idx])))
+#                     cos = np.cos(np.arcsin(np.asarray([frame[i]["sin_normalised_contact"] for i in key_joints])))
 #                     cos = cos * vel
 #                     row_vec.append(np.concatenate([np.asarray([sin[i], cos[i]]) for i in range(len(sin))]))
+#                 elif feature == "targetRotation":
+#                     row_vec.append(np.concatenate([frame[jj][feature].ravel() for jj in key_joints]))
 #                 else:
-#                     row_vec.append(np.asarray([frame[jj][feature] for jj in key_joints]))
+#                     row_vec.append(np.concatenate([frame[jj][feature] for jj in key_joints]))
 #
 #                 if first_row:
 #                     data_dims.append(row_vec[-1].shape)
 #                     feature_list.append(feature)
-#
 #             for feature in pose_features:
 #                 if feature=="rotMat":
 #                     row_vec.append(np.concatenate([jo["rotMat"].ravel() for jo in frame]))
@@ -676,20 +674,21 @@ phase_features = ["phase_vec"]
 #                     row_vec.append(np.concatenate([[jo[feature]] for jo in frame]))
 #                 else:
 #                     row_vec.append(np.concatenate([jo[feature] for jo in frame]))
-#
 #                 if first_row:
 #                     data_dims.append(row_vec[-1].shape)
 #                     feature_list.append(feature)
+#
 #             for feature in cost_features:
 #                 if feature == "contact":
-#                     row_vec.append(np.asarray([d["frames"][idx][jj]["contact"] for jj in key_joints for idx in f_idx]))
-#                 elif feature == "targetRotation":
-#                     row_vec.append(np.concatenate([frame[jj][feature].ravel() for jj in key_joints]))
+#                     row_vec.append(np.asarray([frame[jj]["contact"] for jj in key_joints]))
 #                 elif feature == "posCost" or feature == "rotCost":
-#                     row_vec.append(np.concatenate([d["frames"][idx][jj][feature] for jj in key_joints for idx in f_idx]))
+#                     row_vec.append(np.concatenate([frame[jj][feature] for jj in key_joints]))
 #                 elif feature == "tPos" or feature == "tRot":
 #                     feature = "pos" if feature == "tPos" else "rotMat"
-#                     row_vec.append(np.concatenate([d["frames"][idx][jj][feature].ravel() for jj in key_joints for idx in f_idx]))
+#                     row_vec.append(np.concatenate([frame[jj][feature].ravel() for jj in key_joints]))
+#                 elif feature == "targetRotation":
+#                     row_vec.append(np.concatenate([frame[jj][feature].ravel() for jj in key_joints]))
+#
 #                 else:
 #                     row_vec.append(np.concatenate([frame[jj][feature] for jj in key_joints]))
 #
@@ -701,16 +700,8 @@ phase_features = ["phase_vec"]
 #         data_tensors.append(np.vstack(sequence))
 #
 #
-#
-#
-#
-def loss_fn(x, y):
-    return nn.functional.mse_loss(x,y, reduction="mean")
-def normalise(x):
-    std = torch.std(x, dim=0)
-    std[std==0] = 1
-    return (x-torch.mean(x,dim=0)) / std
 
+#
 # extra_feature_len = 21 * 3
 # n_phase_features = len(phase_features)
 # n_pose_features = len(pose_features)
@@ -724,68 +715,65 @@ def normalise(x):
 # print("pose dim: ", pose_dim)
 # print("cost dim: ", cost_dim)
 #
-#
 # x_tensors = torch.stack([normalise(torch.from_numpy(clip[:-1])).float() for clip in data_tensors])
-# y_tensors = torch.stack([torch.from_numpy(clip[1:]).float() for clip in data_tensors])
+# y_tensors = torch.stack([torch.from_numpy(clip[1:][:, :-(cost_dim+extra_feature_len)]).float() for clip in data_tensors])
+#
 #
 # print(len(x_tensors), x_tensors[0].shape)
 # print(len(y_tensors), y_tensors[0].shape)
 #
-# dataset = TensorDataset(x_tensors, y_tensors)
-# N = len(x_tensors)
 #
-# train_ratio = int(.7*N)
-# val_ratio = int((N-train_ratio) / 2.0)
-# test_ratio = N-train_ratio-val_ratio
-# train_set, val_set, test_set = random_split(dataset, [train_ratio, val_ratio, test_ratio], generator=torch.Generator().manual_seed(2021))
+#
+# dataset = TensorDataset(x_tensors, y_tensors)
+# data_set_len = len(dataset)
+# train_ratio = int(.7 * data_set_len)
+# val_ratio = int((data_set_len - train_ratio) / 2.0)
+# test_ratio = data_set_len - train_ratio - val_ratio
+# train_set, val_set, test_set = random_split(dataset, [train_ratio, val_ratio, test_ratio],
+#                                             generator=torch.Generator().manual_seed(2021))
 # print(len(train_set), len(val_set), len(test_set))
 #
-# input_dim = phase_dim + pose_dim + cost_dim
-# output_dim = phase_dim + pose_dim-extra_feature_len
-# print(input_dim)
-# print(output_dim)
+# data_1 = {"data_sets":[train_set, val_set, test_set], "desc":"phase+pose+cost_single-frame", "dims":[phase_dim, pose_dim, cost_dim]}
+# with bz2.BZ2File("data_sets_1_MoE.pbz2", "w") as f:
+#     pickle.dump(data_1, f)
+def loss_fn(x, y):
+    return nn.functional.mse_loss(x,y, reduction="mean")
 
-# with bz2.BZ2File("train_data_v4.pbz2", "w") as f:
-#     pickle.dump(train_set, f)
-#
-# with bz2.BZ2File("val_data_v4.pbz2", "w") as f:
-#     pickle.dump(val_set, f)
-#
-# with bz2.BZ2File("test_data_v4.pbz2", "w") as f:
-#     pickle.dump(test_set, f)
-#
-# with bz2.BZ2File("dims_v4.pbz2", "w") as f:
-#     pickle.dump([input_dim, output_dim, phase_dim, pose_dim, extra_feature_len, cost_dim, feature_list], f)
+def loss_fn2(x, y):
+    return nn.functional.smooth_l1_loss(x,y, reduction="mean")
+def normalise(x):
+    std = torch.std(x, dim=0)
+    std[std==0] = 1
+    return (x-torch.mean(x,dim=0)) / std
 
-with bz2.BZ2File("train_data_v4.pbz2", "rb") as f:
-    train_set = pickle.load(f)
-with bz2.BZ2File("val_data_v4.pbz2", "rb") as f:
-    val_set = pickle.load(f)
-with bz2.BZ2File("dims_v4.pbz2", "rb") as f:
-    dims = pickle.load(f)
-input_dim = dims[0]
-output_dim = dims[1]
-phase_dim = dims[2]
-pose_dim = dims[3]
-extra_feature_len = dims[4]
-cost_dim = dims[5]
-feature_list = dims[6]
+with bz2.BZ2File("data_sets_1_MoE.pbz2", "rb") as f:
+        obj = pickle.load(f)
+
+train_set = obj["data_sets"][0]
+val_set = obj["data_sets"][1]
+# train_set = obj["data_sets"][0]
+phase_dim = obj["dims"][0]
+pose_dim = obj["dims"][1]
+cost_dim = obj["dims"][2]
+extra_feature_len = 21 * 3
+
+input_dim = phase_dim + pose_dim + cost_dim
+output_dim = phase_dim + pose_dim-extra_feature_len
+print(input_dim)
+print(output_dim)
 
 config = {
     "k_experts":tune.choice([1, 2, 4, 8, 10]),
     "gate_size":tune.choice([16, 32, 64, 128]),
-    "keep_prob":tune.choice([.2, .25, .3]),
-    "hidden_dim":tune.choice([16, 32, 64, 128, 256, 512]),
-    "cost_hidden_dim" : tune.choice([16, 32, 64, 128, 256]),
-    "cost_output_dim" : tune.choice([16, 32, 64, 128, 256]),
+    "keep_prob":tune.choice([.2]),
+    "hidden_dim":tune.choice([32, 64, 128, 256, 512]),
+    "cost_hidden_dim" : tune.choice([16, 32, 64, 128, 512]),
+    "cost_output_dim" : tune.choice([16, 32, 64, 128, 512]),
     "batch_size":tune.choice([1]),
-    "num_layers":tune.choice([2, 3, 4]),
-    "lr":tune.loguniform(1e-4, 1e-8),
-    "loss_fn":tune.choice([loss_fn]),
-    "window_size":tune.choice([1]),
-    "autoregress_prob" : tune.choice([.2]),
-    "autoregress_inc" : tune.choice([1]),
-    "autoregress_chunk_size" : tune.choice([2, 4, 8, 12, 24, 40])
+    "lr":tune.loguniform(1e-3, 1e-8),
+    "loss_fn":tune.choice([loss_fn, loss_fn2]),
+    "num_layers" : tune.choice([2, 3, 4]),
+    "autoregress_chunk_size" : tune.choice([2, 4, 8, 10, 20, 40])
 }
 
 def tuning(config=None, MODEL=None, pose_autoencoder=None, cost_dim=None, phase_dim=None,
@@ -809,8 +797,8 @@ def tuning(config=None, MODEL=None, pose_autoencoder=None, cost_dim=None, phase_
 
 
 def start_training(name):
-    Epochs = 1000
-    Samples = 50
+    Epochs = 300
+    Samples = 100
     ModelName=name
 
     pose_autoencoder = MLP_withLabel.load_checkpoint("/home/nuoc/Documents/MEX/models/MLP4_withLabel_best/M3/0.00324857.512.pbz2")
@@ -820,7 +808,7 @@ def start_training(name):
 
     scheduler = ASHAScheduler(max_t = Epochs, grace_period=15, reduction_factor=2)
     reporter = CLIReporter(
-        parameter_columns=["k", "lr", "batch_size", "loss_fn"],
+        parameter_columns=list(config.keys()),
         metric_columns=["loss", "training_iteration"],
         max_error_rows=5,
         max_progress_rows=5,
@@ -834,12 +822,12 @@ def start_training(name):
             cost_dim = cost_dim,
             phase_dim=phase_dim,
             input_slices=[phase_dim, pose_dim, cost_dim],
-            output_slices = [phase_dim, phase_dim, pose_encoder_out_dim, cost_dim],
+            output_slices=[phase_dim, phase_dim, pose_encoder_out_dim],
             train_set=train_set, val_set=val_set,
             num_epochs=Epochs,
             model_name=ModelName
         ),
-        resources_per_trial= {"cpu":2, "gpu":1},
+        resources_per_trial= {"cpu":6, "gpu":1},
         metric="loss",
         mode="min",
         config=config,
@@ -860,7 +848,6 @@ def start_training(name):
 
 
 if __name__ == "__main__":
-    model_name = "LSTM_Test_1"
+    model_name = "Test3_LSTM_pose+phase_single-frame"
     start_training(model_name)
-    clean_checkpoints(path="/home/nuoc/Documents/MEX/models/"+model_name)
-
+    clean_checkpoints("/home/nuoc/Documents/MEX/models/"+model_name)
