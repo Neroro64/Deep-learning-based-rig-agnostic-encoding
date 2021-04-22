@@ -483,73 +483,112 @@ class MoE(nn.Module):
 
 
 class MotionGenerationModel(pl.LightningModule):
-    def __init__(self, config:dict=None, pose_autoencoder=None, cost_input_dimension=None, phase_dim=0,
-                 input_slicers:list=None, output_slicers:list=None, train_set=None, val_set=None, name="model", load=False):
+    def __init__(self, config: dict = None, pose_autoencoder=None, cost_input_dimension=None, phase_dim=0,
+                 input_slicers: list = None, output_slicers: list = None, train_set=None, val_set=None, name="model",
+                 load=False):
         super().__init__()
 
         if not load:
-            self.pose_autoencoder = pose_autoencoder # start with 3
+            self.pose_autoencoder = pose_autoencoder  # start with 3
             cost_hidden_dim = config["cost_hidden_dim"]
             cost_output_dim = config["cost_output_dim"]
-            self.cost_encoder = MLP(dimensions=[cost_input_dimension, cost_hidden_dim, cost_hidden_dim, cost_output_dim],
-                                    name="CostEncoder", load=True, single_module=-1)
+            self.cost_encoder = MLP(
+                dimensions=[cost_input_dimension, cost_hidden_dim, cost_hidden_dim, cost_output_dim],
+                name="CostEncoder", load=True, single_module=-1)
 
-
+            self.phase_dim = phase_dim
             phase_dim = input_slicers[0]
             moe_input_dim = pose_autoencoder.dimensions[-1] + cost_output_dim
-            moe_output_dim = pose_autoencoder.dimensions[-1] + pose_autoencoder.extra_feature_len + phase_dim*2 + cost_input_dimension
-            self.generationModel =  MoE(config=config, dimensions=[moe_input_dim, moe_output_dim], phase_input_dim=phase_dim,
-                                        name="MixtureOfExperts")
+            moe_output_dim = pose_autoencoder.dimensions[-1] + self.phase_dim + cost_input_dimension
+            self.generationModel = MoE(config=config, dimensions=[moe_input_dim, moe_output_dim],
+                                       phase_input_dim=phase_dim,
+                                       name="MixtureOfExperts")
 
             self.in_slices = [0] + list(accumulate(add, input_slicers))
             self.out_slices = [0] + list(accumulate(add, output_slicers))
 
-            self.config=config
+            self.config = config
             self.batch_size = config["batch_size"]
             self.learning_rate = config["lr"]
             self.loss_fn = config["loss_fn"]
             self.window_size = config["window_size"]
             self.autoregress_chunk_size = config["autoregress_chunk_size"]
-            # self.autoregress_prob = config["autoregress_prob"]
+            self.autoregress_prob = config["autoregress_prob"]
             self.autoregress_inc = config["autoregress_inc"]
             self.best_val_loss = np.inf
             self.phase_smooth_factor = 0.9
+            self.epochs = 0
 
         self.train_set = train_set
         self.val_set = val_set
         self.name = name
         self.epochs = 0
 
-
-
     def forward(self, x):
         x_tensors = [x[:, d0:d1] for d0, d1 in zip(self.in_slices[:-1], self.in_slices[1:])]
         pose_h, pose_label = self.pose_autoencoder.encode(x_tensors[1])
+        phase = x_tensors[0][:, :self.phase_dim]
+        targets = x_tensors[0][:, self.phase_dim:]
         embedding = torch.cat([pose_h, self.cost_encoder(x_tensors[2])], dim=1)
+        # embedding = torch.cat([pose_h, x_tensors[2]], dim=1)
         out = self.generationModel(embedding, x_tensors[0])
-        out_tensors = [out[:, d0:d1] for d0, d1 in zip(self.out_slices[:-1], self.out_slices[1:])] # phase, phase_update, pose
+        out_tensors = [out[:, d0:d1] for d0, d1 in
+                       zip(self.out_slices[:-1], self.out_slices[1:])]  # phase, phase_update, pose
 
-        phase = self.update_phase(x_tensors[0], out_tensors[0], out_tensors[1]) # phase_0, phase_1, phase_update
-        new_pose = self.pose_autoencoder.decode(out_tensors[2], pose_label)
-        return torch.cat([phase, new_pose, pose_label, out_tensors[-1]],dim=1)
+        phase = self.update_phase(phase, out_tensors[0])  # phase_0, phase_1, phase_update
+        new_pose = self.pose_autoencoder.decode(out_tensors[1], pose_label)
+        return torch.cat([phase, targets, new_pose, pose_label, out_tensors[-1]], dim=1)
 
     def training_step(self, batch, batch_idx):
         x, y = batch
 
-        x_chunks = torch.split(x, self.autoregress_chunk_size, dim=1)
-        y_chunks = torch.split(y, self.autoregress_chunk_size, dim=1)
+        # x_chunks = torch.split(x, self.autoregress_chunk_size, dim=1)
+        # y_chunks = torch.split(y, self.autoregress_chunk_size, dim=1)
+        # if len(x_chunks) == 1:
+        #     x_chunks = x_chunks[0]
+        #     y_chunks = y_chunks[0]
+        # else:
+        #     x_chunks = torch.cat(x_chunks[:-1], dim=0)
+        #     y_chunks = torch.cat(y_chunks[:-1], dim=0)
+        #
+        # if self.autoregress_chunk_size == 1:
+        #     out = self(x_chunks.view((-1, x_chunks.size()[-1])))
+        #     loss = self.loss_fn(out, y_chunks.view((-1, y_chunks.size()[-1])))
+        # else:
+        #     loss = 0
+        #     x_c = x_chunks[:, 0, :]
+        #     outputs = []
+        #     for i in range(y_chunks.size()[1]):
+        #         out = self(x_c)
+        #         # loss += self.loss_fn(out, y_chunks[:, i, :])
+        #         outputs.append(out.unsqueeze(dim=1))
+        #         x_c = out
+        #     loss = self.loss_fn(torch.cat(outputs, dim=1), y_chunks)
 
-        x_chunks = torch.cat(x_chunks[:-1], dim=0)
-        y_chunks = torch.cat(y_chunks[:-1], dim=0)
-
+        n = x.size()[1]
         loss = 0
-        _x = x_chunks[:, 0, :]
-        for i in range(self.autoregress_chunk_size):
-            _y = y_chunks[:, i, :]
-            out = self(_x)
-            loss += self.loss_fn(out, _y)
-            _x = out
-        loss /= float(self.autoregress_chunk_size)
+        x_c = x[:, 0, :]
+        if self.autoregress_prob < 1:
+            autoregress_bools = torch.randn(n) < self.autoregress_prob
+            for i in range(1, n):
+                y_c = y[:, i - 1, :]
+                out = self(x_c)
+                loss += self.loss_fn(out, y_c)
+                if autoregress_bools[i]:
+                    x_c = out
+                else:
+                    x_c = x[:, i, :]
+
+            loss /= float(n)
+        else:
+            for i in range(1, n):
+                y_c = y[:, i - 1, :]
+                out = self(x_c)
+                loss += self.loss_fn(out, y_c)
+                x_c = x[:, i, :]
+
+            loss /= float(n)
+        #
 
         self.log("ptl/train_loss", loss)
         return loss
@@ -557,26 +596,65 @@ class MotionGenerationModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         x, y = batch
 
-        x_chunks = torch.split(x, self.autoregress_chunk_size, dim=1)
-        y_chunks = torch.split(y, self.autoregress_chunk_size, dim=1)
+        # x_chunks = torch.split(x, self.autoregress_chunk_size, dim=1)
+        # y_chunks = torch.split(y, self.autoregress_chunk_size, dim=1)
+        # if len(x_chunks) == 1:
+        #     x_chunks = x_chunks[0]
+        #     y_chunks = y_chunks[0]
+        # else:
+        #     x_chunks = torch.cat(x_chunks[:-1], dim=0)
+        #     y_chunks = torch.cat(y_chunks[:-1], dim=0)
+        #
+        # if self.autoregress_chunk_size == 1:
+        #     out = self(x_chunks.view((-1, x_chunks.size()[-1])))
+        #     loss = self.loss_fn(out, y_chunks.view((-1, y_chunks.size()[-1])))
+        # else:
+        #     loss = 0
+        #     x_c = x_chunks[:, 0, :]
+        #     outputs = []
+        #     for i in range(y_chunks.size()[1]):
+        #         out = self(x_c)
+        #         # loss += self.loss_fn(out, y_chunks[:, i, :])
+        #         outputs.append(out.unsqueeze(dim=1))
+        #         x_c = out
+        #     loss = self.loss_fn(torch.cat(outputs, dim=1), y_chunks)
 
-        x_chunks = torch.cat(x_chunks[:-1], dim=0)
-        y_chunks = torch.cat(y_chunks[:-1], dim=0)
+        # loss /= float(self.autoregress_chunk_size)
 
+        n = x.size()[1]
         loss = 0
-        _x = x_chunks[:, 0, :]
-        for i in range(self.autoregress_chunk_size):
-            _y = y_chunks[:, i, :]
-            out = self(_x)
-            loss += self.loss_fn(out, _y)
-            _x = out
-        loss /= float(self.autoregress_chunk_size)
+        x_c = x[:, 0, :]
+        if self.autoregress_prob < 1:
+            autoregress_bools = torch.randn(n) < self.autoregress_prob
+            for i in range(1, n):
+                y_c = y[:, i - 1, :]
+                out = self(x_c)
+                loss += self.loss_fn(out, y_c)
+                if autoregress_bools[i]:
+                    x_c = out
+                else:
+                    x_c = x[:, i, :]
+
+            loss /= float(n)
+        else:
+            for i in range(1, n):
+                y_c = y[:, i - 1, :]
+                out = self(x_c)
+                loss += self.loss_fn(out, y_c)
+                x_c = x[:, i, :]
+
+            loss /= float(n)
+        #
+
         self.log("ptl/val_loss", loss, prog_bar=True)
-        return {"val_loss":loss}
+        return {"val_loss": loss}
 
     def validation_epoch_end(self, outputs):
-        if self.epochs > 0 and self.epochs % 50==0:
-            self.autoregress_chunk_size = int(min(120, self.autoregress_chunk_size*self.autoregress_inc))
+        if self.epochs > 0 and self.epochs % 20 == 0:
+            self.autoregress_prob = min(1, self.autoregress_prob + self.autoregress_inc)
+            self.autoregress_chunk_size = min(120, self.autoregress_chunk_size + self.autoregress_inc)
+        elif self.epochs > 0 and self.epochs % 50 == 0:
+            self.scheduler.step()
         self.epochs += 1
 
         avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
@@ -593,18 +671,18 @@ class MotionGenerationModel(pl.LightningModule):
         cost_encoder_path = self.cost_encoder.save_checkpoint(best_val_loss=loss, checkpoint_dir=path)
         generationModel_path = self.generationModel.save_checkpoint(best_val_loss=loss, checkpoint_dir=path)
 
-        model = {"name":self.name,
-                 "pose_autoencoder_path":pose_autoencoder_path,
+        model = {"name": self.name,
+                 "pose_autoencoder_path": pose_autoencoder_path,
                  "cost_encoder_path": cost_encoder_path,
-                 "motionGenerationModelPath":generationModel_path,
-                 "in_slices":self.in_slices,
-                 "out_slices":self.out_slices,
+                 "motionGenerationModelPath": generationModel_path,
+                 "in_slices": self.in_slices,
+                 "out_slices": self.out_slices,
                  }
 
         if not os.path.exists(path):
             os.mkdir(path)
         with bz2.BZ2File(os.path.join(path,
-                                      str(loss)+".pbz2"), "w") as f:
+                                      str(loss) + ".pbz2"), "w") as f:
             pickle.dump(model, f)
 
     @staticmethod
@@ -624,41 +702,40 @@ class MotionGenerationModel(pl.LightningModule):
 
         return model
 
-    def update_phase(self, p1, p2, p_delta):
-        return self.phase_smooth_factor * p2 + (1-self.phase_smooth_factor)*(p1+p_delta)
+    def update_phase(self, p1, p2):
+        return self.phase_smooth_factor * p2 + (1 - self.phase_smooth_factor) * p1
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.99)
-        # torch.optim.lr_scheduler.CyclicLR
-        return [optimizer],[scheduler]
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=32, gamma=0.5)
+        self.scheduler = scheduler
+        return optimizer
 
     def train_dataloader(self):
-        return DataLoader(self.train_set, batch_size=self.batch_size, pin_memory=True, num_workers=4)
+        return DataLoader(self.train_set, batch_size=self.batch_size, pin_memory=True)
 
     def val_dataloader(self):
-        return DataLoader(self.val_set, batch_size=self.batch_size, pin_memory=True, num_workers=4)
+        return DataLoader(self.val_set, batch_size=self.batch_size, pin_memory=True)
 
     def test_dataloader(self):
-        return DataLoader(self.test_set, batch_size=self.batch_size, pin_memory=True, num_workers=4)
+        return DataLoader(self.test_set, batch_size=self.batch_size, pin_memory=True)
 
 
-
-data_path = [
-             "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two.pbz2",
-             "/home/nuoc/Documents/MEX/data/ONE_R2-default-One.pbz2",
-             "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-large.pbz2",
-             "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-small.pbz2",
-             "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two-small.pbz2",
-             "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two-large.pbz2",
-             "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two.pbz2",
-             "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two-large.pbz2",
-             "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two-small.pbz2",
-             ]
-
-pose_features = ["pos", "rotMat", "velocity", "isLeft", "chainPos", "geoDistanceNormalised"]
-cost_features = ["tPos", "tRot", "posCost", "rotCost", "contact", "targetPosition", "targetRotation"]
-phase_features = ["phase_vec"]
+# data_path = [
+#              "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two.pbz2",
+#              "/home/nuoc/Documents/MEX/data/ONE_R2-default-One.pbz2",
+#              "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-large.pbz2",
+#              "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-small.pbz2",
+#              "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two-small.pbz2",
+#              "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two-large.pbz2",
+#              "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two.pbz2",
+#              "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two-large.pbz2",
+#              "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two-small.pbz2",
+#              ]
+#
+# pose_features = ["pos", "rotMat", "velocity", "isLeft", "chainPos", "geoDistanceNormalised"]
+# cost_features = ["tPos", "tRot", "posCost", "rotCost", "contact", "targetPosition", "targetRotation"]
+# phase_features = ["phase_vec"]
 
 # def load(file_path):
 #     with bz2.BZ2File(file_path, "rb") as f:
@@ -749,6 +826,10 @@ phase_features = ["phase_vec"]
 #
 def loss_fn(x, y):
     return nn.functional.mse_loss(x,y, reduction="mean")
+
+def loss_fn2(x, y):
+    return nn.functional.smooth_l1_loss(x,y, reduction="mean")
+
 def normalise(x):
     std = torch.std(x, dim=0)
     std[std==0] = 1
@@ -800,33 +881,53 @@ def normalise(x):
 # with bz2.BZ2File("dims_v4.pbz2", "w") as f:
 #     pickle.dump([input_dim, output_dim, phase_dim, pose_dim, extra_feature_len, cost_dim, feature_list], f)
 
-with bz2.BZ2File("train_data_v4.pbz2", "rb") as f:
-    train_set = pickle.load(f)
-with bz2.BZ2File("val_data_v4.pbz2", "rb") as f:
-    val_set = pickle.load(f)
-with bz2.BZ2File("dims_v4.pbz2", "rb") as f:
-    dims = pickle.load(f)
-input_dim = dims[0]
-output_dim = dims[1]
-phase_dim = dims[2]
-pose_dim = dims[3]
-extra_feature_len = dims[4]
-cost_dim = dims[5]
-feature_list = dims[6]
+with bz2.BZ2File("data_sets_4_MoE_autoregressive.pbz2", "rb") as f:
+    data = pickle.load(f)
+
+train_set = data["data_sets"][0]
+val_set = data["data_sets"][1]
+test_set = data["data_sets"][2]
+dims = data["dims"]
+
+# input_dim = dims[0]
+# output_dim = dims[1]
+phase_dim = dims[0]
+pp_dim = dims[1][0]
+pose_dim = dims[2]
+# extra_feature_len = dims[4]
+cost_dim = dims[3]
+# feature_list = dims[6]
+
+# config = {
+#     "k_experts":tune.choice([1, 2, 4, 8, 10]),
+#     "gate_size":tune.choice([16, 32, 64, 128]),
+#     "keep_prob":tune.choice([.2, .25, .3]),
+#     "hidden_dim":tune.choice([16, 32, 64, 128, 256, 512]),
+#     "cost_hidden_dim" : tune.choice([16, 32, 64, 128, 256]),
+#     "cost_output_dim" : tune.choice([16, 32, 64, 128, 256]),
+#     "batch_size":tune.choice([32, 64]),
+#     "lr":tune.loguniform(1e-5, 1e-8),
+#     "loss_fn":tune.choice([loss_fn, loss_fn2]),
+#     "window_size":tune.choice([1]),
+#     "autoregress_prob" : tune.choice([0]),
+#     "autoregress_inc" : tune.choice([.1, .2]),
+#     "autoregress_chunk_size" : tune.choice([1, 2])
+# }
 
 config = {
     "k_experts":tune.choice([1, 2, 4, 8, 10]),
-    "gate_size":tune.choice([16, 32, 64, 128]),
-    "keep_prob":tune.choice([.2, .25, .3]),
-    "hidden_dim":tune.choice([16, 32, 64, 128, 256, 512]),
-    "cost_hidden_dim" : tune.choice([16, 32, 64, 128, 256]),
-    "cost_output_dim" : tune.choice([16, 32, 64, 128, 256]),
-    "batch_size":tune.choice([1]),
-    "lr":tune.loguniform(1e-4, 1e-8),
-    "loss_fn":tune.choice([loss_fn]),
+    "gate_size":tune.choice([64, 128]),
+    "keep_prob":tune.choice([.2]),
+    "hidden_dim":tune.choice([32,  128, 512]),
+    "cost_hidden_dim" : tune.choice([32, 128, 256]),
+    "cost_output_dim" : tune.choice([32, 128, 256]),
+    "batch_size":tune.choice([32]),
+    # "lr":tune.loguniform(1e-5, 1e-8),
+    "lr":tune.choice([2.1548898181698153e-06]),
+    "loss_fn":tune.choice([loss_fn2]),
     "window_size":tune.choice([1]),
-    "autoregress_prob" : tune.choice([.2]),
-    "autoregress_inc" : tune.choice([2, 4]),
+    "autoregress_prob" : tune.choice([0]),
+    "autoregress_inc" : tune.choice([.2]),
     "autoregress_chunk_size" : tune.choice([1, 2])
 }
 
@@ -843,7 +944,7 @@ def tuning(config=None, MODEL=None, pose_autoencoder=None, cost_dim=None, phase_
             EarlyStopping(monitor="avg_val_loss")
         ],
     )
-    model = MODEL(config=config, pose_autoencoder=pose_autoencoder, cost_input_dimension=cost_dim, phase_dim=phase_dim,
+    model = MODEL(config=config, pose_autoencoder=pose_autoencoder, cost_input_dimension=cost_dim, phase_dim=pp_dim,
                               input_slicers=input_slices, output_slicers=output_slices,
                               train_set=train_set, val_set=val_set, name=model_name)
 
@@ -851,8 +952,8 @@ def tuning(config=None, MODEL=None, pose_autoencoder=None, cost_dim=None, phase_
 
 
 def start_training(name):
-    Epochs = 1000
-    Samples = 50
+    Epochs = 800
+    Samples = 10
     ModelName=name
 
     pose_autoencoder = MLP_withLabel.load_checkpoint("/home/nuoc/Documents/MEX/models/MLP4_withLabel_best/M3/0.00324857.512.pbz2")
@@ -860,7 +961,7 @@ def start_training(name):
 
     pose_encoder_out_dim = pose_autoencoder.dimensions[-1]
 
-    scheduler = ASHAScheduler(max_t = Epochs, grace_period=15, reduction_factor=2)
+    scheduler = ASHAScheduler(max_t = Epochs, grace_period=20, reduction_factor=2)
     reporter = CLIReporter(
         parameter_columns=["k", "lr", "batch_size", "loss_fn"],
         metric_columns=["loss", "training_iteration"],
@@ -876,7 +977,7 @@ def start_training(name):
             cost_dim = cost_dim,
             phase_dim=phase_dim,
             input_slices=[phase_dim, pose_dim, cost_dim],
-            output_slices = [phase_dim, phase_dim, pose_encoder_out_dim, cost_dim],
+            output_slices = [pp_dim, pose_encoder_out_dim, cost_dim],
             train_set=train_set, val_set=val_set,
             num_epochs=Epochs,
             model_name=ModelName
@@ -902,7 +1003,7 @@ def start_training(name):
 
 
 if __name__ == "__main__":
-    model_name = "MoE_Test_6"
+    model_name = "MoE_Test_9_autoregressive_improved"
     start_training(model_name)
     clean_checkpoints(path="/home/nuoc/Documents/MEX/models/"+model_name)
 

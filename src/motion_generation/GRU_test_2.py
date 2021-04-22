@@ -389,7 +389,7 @@ class RNN(nn.Module):
         self.decoder = nn.Linear(in_features=self.hidden_dim, out_features=dimensions[-1])
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
-        self.reset_hidden()
+        # self.reset_hidden()
         h_t, h_n = self.rnn(x, self.hidden)
         self.hidden = h_n
         return self.decoder(h_t)
@@ -452,11 +452,14 @@ class MotionGenerationModel(pl.LightningModule):
                                     name="CostEncoder", load=True, single_module=-1)
 
 
+            self.phase_dim = phase_dim
             phase_dim = input_slicers[0]
+
             moe_input_dim = pose_autoencoder.dimensions[-1] + phase_dim + cost_output_dim
-            moe_output_dim = pose_autoencoder.dimensions[-1] + pose_autoencoder.extra_feature_len + phase_dim * 2 + cost_input_dimension
+            moe_output_dim = pose_autoencoder.dimensions[-1] +  self.phase_dim * 2 + cost_input_dimension
+
             self.generationModel = RNN(config=config, dimensions=[moe_input_dim, moe_output_dim], device=self.device,
-                                        batch_size=2*config["batch_size"],name="GRU")
+                                        batch_size=config["batch_size"],name="GRU")
 
                                             # (120 * config["batch_size"]) / config["autoregress_chunk_size"]) - 1 *
                                             #        config["batch_size"],
@@ -474,10 +477,11 @@ class MotionGenerationModel(pl.LightningModule):
             self.learning_rate = config["lr"]
             self.loss_fn = config["loss_fn"]
             self.autoregress_chunk_size = config["autoregress_chunk_size"]
-            # self.autoregress_prob = config["autoregress_prob"]
-            # self.autoregress_inc = config["autoregress_inc"]
+            self.autoregress_prob = config["autoregress_prob"]
+            self.autoregress_inc = config["autoregress_inc"]
             self.best_val_loss = np.inf
             self.phase_smooth_factor = 0.9
+            self.epochs = 0
 
         self.train_set = train_set
         self.val_set = val_set
@@ -486,58 +490,110 @@ class MotionGenerationModel(pl.LightningModule):
 
 
     def forward(self, x):
+        x = x.unsqueeze(dim=1)
         x_tensors = [torch.reshape(x[:, :, d0:d1], (-1, d1-d0)) for d0, d1 in zip(self.in_slices[:-1], self.in_slices[1:])]
         pose_h, pose_label = self.pose_autoencoder.encode(x_tensors[1])
-
+        phase = x_tensors[0][:, :self.phase_dim]
+        # targets = x_tensors[0][:, self.phase_dim:]
         embedding = torch.cat([x_tensors[0], pose_h, self.cost_encoder(x_tensors[2])], dim=1)
         embedding = torch.reshape(embedding, (-1, x.size()[1], embedding.size()[-1]))
         out = self.generationModel(embedding)
         out_tensors = [torch.reshape(out[:, :, d0:d1], (-1, d1-d0)) for d0, d1 in zip(self.out_slices[:-1], self.out_slices[1:])] # phase, phase_update, pose
 
-        phase = self.update_phase(x_tensors[0], out_tensors[0], out_tensors[1]) # phase_0, phase_1, phase_update
+        phase = self.update_phase(phase, out_tensors[0], out_tensors[1]) # phase_0, phase_1, phase_update
         new_pose = self.pose_autoencoder.decode(out_tensors[2], pose_label)
-        output = torch.cat([phase, new_pose],dim=1)
-        return output
+        # return torch.cat([phase, targets, new_pose, pose_label, out_tensors[-1]], dim=1)
+        return torch.cat([phase, new_pose, pose_label, out_tensors[-1]], dim=1)
 
     def training_step(self, batch, batch_idx):
         x, y = batch
-        seq = int(x.size()[1] / 2)
-        x_chunks = [x[:, :seq, :], x[:, seq:-1, :]]
-        y_chunks = [y[:, :seq, :], y[:, seq:-1, :]]
 
-        x_chunks = torch.cat(x_chunks, dim=0)
-        y_chunks = torch.cat(y_chunks, dim=0)
+        diff = self.batch_size - x.size()[0]
+        if diff > 0:
+            idx = torch.randint(0, x.size()[0], (diff, ), requires_grad=False)
 
+            x = torch.cat([x, x[idx]], dim=0)
+            y = torch.cat([y, y[idx]], dim=0)
+
+
+        n = x.size()[1]
         loss = 0
-        out = self(x_chunks)
-        # out = torch.reshape(out, (-1, out.size()[-1]))
-        y_chunks = torch.reshape(y_chunks, (-1, y_chunks.size()[-1]))
-        loss += self.loss_fn(out, y_chunks)
+        x_c = x[:, 0, :]
+        self.generationModel.reset_hidden()
+        if self.autoregress_prob < 1:
+            autoregress_bools = torch.randn(n) < self.autoregress_prob
+            for i in range(1, n):
+                y_c = y[:, i - 1, :]
+                out = self(x_c)
+                loss += self.loss_fn(out, y_c)
+                if autoregress_bools[i]:
+                    x_c = out
+                else:
+                    self.generationModel.reset_hidden()
+                    x_c = x[:, i, :]
 
+            loss /= float(n)
+        else:
+            for i in range(1, n):
+                y_c = y[:, i - 1, :]
+                out = self(x_c)
+                loss += self.loss_fn(out, y_c)
+                x_c = out
+
+            loss /= float(n)
+
+        self.log("ptl/train_loss", loss)
         return loss
 
     def validation_step(self, batch, batch_idx):
         x,y = batch
 
-        seq = int(x.size()[1] / 2)
-        x_chunks = [x[:, :seq, :], x[:, seq:-1, :]]
-        y_chunks = [y[:, :seq, :], y[:, seq:-1, :]]
-        # y_chunks = torch.split(y, seq, dim=1)
+        diff = self.batch_size - x.size()[0]
+        if diff > 0:
+            idx = torch.randint(0, x.size()[0], (diff,), requires_grad=False)
+            # raise ValueError(x.size(), x[idx].size())
+            x = torch.cat([x, x[idx]], dim=0)
+            y = torch.cat([y, y[idx]], dim=0)
 
-        x_chunks = torch.cat(x_chunks, dim=0)
-        y_chunks = torch.cat(y_chunks, dim=0)
 
+        n = x.size()[1]
         loss = 0
-        out = self(x_chunks)
-        # out = torch.reshape(out, (-1, out.size()[-1]))
-        y_chunks = torch.reshape(y_chunks, (-1, y_chunks.size()[-1]))
-        loss += self.loss_fn(out, y_chunks)
+        x_c = x[:, 0, :]
+        self.generationModel.reset_hidden()
+        if self.autoregress_prob < 1:
+            autoregress_bools = torch.randn(n) < self.autoregress_prob
+            for i in range(1, n):
+                y_c = y[:, i - 1, :]
+                out = self(x_c)
+                loss += self.loss_fn(out, y_c)
+                if autoregress_bools[i]:
+                    x_c = out
+                else:
+                    self.generationModel.reset_hidden()
+                    x_c = x[:, i, :]
+
+            loss /= float(n)
+        else:
+            for i in range(1, n):
+                y_c = y[:, i - 1, :]
+                out = self(x_c)
+                loss += self.loss_fn(out, y_c)
+                x_c = out
+
+            loss /= float(n)
 
         self.log("ptl/val_loss", loss, prog_bar=True)
 
         return {"val_loss":loss}
 
     def validation_epoch_end(self, outputs):
+        if self.epochs > 0 and self.epochs % 10 == 0:
+            self.autoregress_prob = min(1, self.autoregress_prob + self.autoregress_inc)
+            self.autoregress_chunk_size = min(120, self.autoregress_chunk_size + self.autoregress_inc)
+        # elif self.epochs > 0 and self.epochs % 50 == 0:
+            # self.scheduler.step()
+        self.epochs += 1
+
         avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
         self.log("avg_val_loss", avg_loss)
         if avg_loss < self.best_val_loss:
@@ -602,23 +658,23 @@ class MotionGenerationModel(pl.LightningModule):
     def test_dataloader(self):
         return DataLoader(self.test_set, batch_size=self.batch_size, pin_memory=True, num_workers=4)
 
-data_path = [
-        "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two.pbz2",
-         "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two-small.pbz2",
-         "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two-large.pbz2",
-        "/home/nuoc/Documents/MEX/data/ONE_R2-default-One.pbz2",
-         "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-large.pbz2",
-         "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-small.pbz2",
-         "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two.pbz2",
-         "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two-large.pbz2",
-         "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two-small.pbz2",
-            ]
-
-
-
-pose_features = ["pos", "rotMat", "velocity", "isLeft", "chainPos", "geoDistanceNormalised"]
-cost_features = ["posCost", "rotCost", "contact"]
-phase_features = ["phase_vec", "targetPosition", "targetRotation"]
+# data_path = [
+# #         "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two.pbz2",
+# #          "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two-small.pbz2",
+# #          "/home/nuoc/Documents/MEX/data/TWO_R2-default-Two-large.pbz2",
+# #         "/home/nuoc/Documents/MEX/data/ONE_R2-default-One.pbz2",
+# #          "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-large.pbz2",
+# #          "/home/nuoc/Documents/MEX/data/ONE_R2-default-One-small.pbz2",
+# #          "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two.pbz2",
+# #          "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two-large.pbz2",
+# #          "/home/nuoc/Documents/MEX/data/TWO_ROT_R2-default-Two-small.pbz2",
+# #             ]
+# #
+# #
+# #
+# # pose_features = ["pos", "rotMat", "velocity", "isLeft", "chainPos", "geoDistanceNormalised"]
+# # cost_features = ["posCost", "rotCost", "contact"]
+# # phase_features = ["phase_vec", "targetPosition", "targetRotation"]
 
 
 
@@ -746,15 +802,16 @@ def normalise(x):
     std[std==0] = 1
     return (x-torch.mean(x,dim=0)) / std
 
-with bz2.BZ2File("data_sets_1_MoE.pbz2", "rb") as f:
+with bz2.BZ2File("data_sets_4_MoE_autoregressive.pbz2", "rb") as f:
         obj = pickle.load(f)
 
 train_set = obj["data_sets"][0]
 val_set = obj["data_sets"][1]
 # train_set = obj["data_sets"][0]
 phase_dim = obj["dims"][0]
-pose_dim = obj["dims"][1]
-cost_dim = obj["dims"][2]
+pp_dim = obj["dims"][1][0]
+pose_dim = obj["dims"][2]
+cost_dim = obj["dims"][3]
 extra_feature_len = 21 * 3
 
 input_dim = phase_dim + pose_dim + cost_dim
@@ -769,12 +826,15 @@ config = {
     "hidden_dim":tune.choice([32, 64, 128, 256, 512]),
     "cost_hidden_dim" : tune.choice([16, 32, 64, 128, 512]),
     "cost_output_dim" : tune.choice([16, 32, 64, 128, 512]),
-    "batch_size":tune.choice([1]),
+    "batch_size":tune.choice([64]),
     "lr":tune.loguniform(1e-3, 1e-8),
     "loss_fn":tune.choice([loss_fn, loss_fn2]),
     "num_layers" : tune.choice([2, 3, 4]),
-    "autoregress_chunk_size" : tune.choice([2, 4, 8, 10, 20, 40])
+    "autoregress_prob" : tune.choice([0]),
+    "autoregress_inc" : tune.choice([.1]),
+    "autoregress_chunk_size" : tune.choice([1, 2])
 }
+
 
 def tuning(config=None, MODEL=None, pose_autoencoder=None, cost_dim=None, phase_dim=None,
           input_slices=None, output_slices=None,
@@ -789,7 +849,7 @@ def tuning(config=None, MODEL=None, pose_autoencoder=None, cost_dim=None, phase_
             EarlyStopping(monitor="avg_val_loss")
         ],
     )
-    model = MODEL(config=config, pose_autoencoder=pose_autoencoder, cost_input_dimension=cost_dim, phase_dim=phase_dim,
+    model = MODEL(config=config, pose_autoencoder=pose_autoencoder, cost_input_dimension=cost_dim, phase_dim=pp_dim,
                               input_slicers=input_slices, output_slicers=output_slices,
                               train_set=train_set, val_set=val_set, name=model_name)
 
@@ -822,7 +882,7 @@ def start_training(name):
             cost_dim = cost_dim,
             phase_dim=phase_dim,
             input_slices=[phase_dim, pose_dim, cost_dim],
-            output_slices=[phase_dim, phase_dim, pose_encoder_out_dim],
+            output_slices=[pp_dim, pp_dim, pose_encoder_out_dim, cost_dim],
             train_set=train_set, val_set=val_set,
             num_epochs=Epochs,
             model_name=ModelName
@@ -848,6 +908,6 @@ def start_training(name):
 
 
 if __name__ == "__main__":
-    model_name = "Test2_GRU_pose+phase_single-frame"
+    model_name = "Test3_GRU_pose+phase_autoregressive"
     start_training(model_name)
     clean_checkpoints("/home/nuoc/Documents/MEX/models/"+model_name)
