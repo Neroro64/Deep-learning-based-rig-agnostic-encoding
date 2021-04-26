@@ -55,6 +55,7 @@ ExportedObj/
 *.cpkt
 *.ckpt
 *.yaml
+*.json
 events.*
 # Unity3D generated file on crash reports
 sysinfo.txt
