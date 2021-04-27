@@ -1,7 +1,0 @@
-Best hyperparameters found were:  {'k': 186, 'hidden_dim': 512, 'lr': 4.75776043588372e-05, 'batch_size': 15, 'loss_fn': <function mse_mae_loss2 at 0x7ff269995b80>, 'ae_loss_fn': <function mse_loss at 0x7ff269995700>, 'activation': <class 'torch.nn.modules.activation.ReLU'>}
-Best achieved loss was:  {'loss': 0.00333201396279037, 'time_this_iter_s': 1.6232502460479736, 'done': True, 'timesteps_total': None, 'episodes_total': None, 'training_iteration': 98, 'experiment_id': 'a7abe16485054fe5a784df7b408b4870', 'date': '2021-04-04_10-57-17', 'timestamp': 1617526637, 'time_total_s': 220.50470781326294, 'pid': 212756, 'hostname': 'Desktop', 'node_ip': '192.168.1.35', 'config': {'k': 186, 'hidden_dim': 512, 'lr': 4.75776043588372e-05, 'batch_size': 15, 'loss_fn': <function mse_mae_loss2 at 0x7ff269995b80>, 'ae_loss_fn': <function mse_loss at 0x7ff269995700>, 'activation': <class 'torch.nn.modules.activation.ReLU'>}, 'time_since_restore': 220.50470781326294, 'timesteps_since_restore': 0, 'iterations_since_restore': 98, 'trial_id': 'e5ec7_00003', 'experiment_tag': "3_activation=<class 'torch.nn.modules.activation.ReLU'>,ae_loss_fn=<function mse_loss at 0x7ff269995700>,batch_size=15,hidden_dim=512,k=186,loss_fn=<function mse_mae_loss2 at 0x7ff269995b80>,lr=4.7578e-05"}
-
-Time: 19m56s
-~150 it/s
-Val_loss: 0.0033
-
