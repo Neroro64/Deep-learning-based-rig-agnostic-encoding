@@ -13,7 +13,7 @@ sys.path.append("../../")
 sys.path.append("../")
 from GlobalSettings import MODEL_PATH
 
-def save(file:object, filename:str, path:str):
+def save3(file:object, filename:str, path:str):
     """
     Writes and compresses an object to the disk
     :param file:
@@ -21,6 +21,8 @@ def save(file:object, filename:str, path:str):
     :param path:
     :return:
     """
+    if not os.path.exists(path):
+        os.mkdir(path)
     with bz2.BZ2File(os.path.join(path, filename+".pbz2"), "w") as f:
         pickle.dump(file, f)
 
@@ -88,7 +90,7 @@ def load_features(data, feature_list, sampling_step=5, frame_window=15, use_wind
             if feature not in feature_dims:
                 feature_dims[feature] = row[-1].shape[0]
 
-            assert(np.isnan(row[-1]).sum() == 0, "{} contains NaN".format(feature))
+            assert np.isnan(row[-1]).sum() == 0, "{} contains NaN".format(feature)
 
         row = np.concatenate(row)
         clip.append(row)
@@ -100,10 +102,10 @@ def load_features_local(data, feature_list, sampling_step=5, frame_window=15, us
     data = pickle.loads(data)
     frames = data["frames"]
     clip = []
-    keyJ = [i for i in range(len(frames)) if frames[0][i]["key"]]
+    keyJ = [i for i in range(len(frames[0])) if frames[0][i]["key"]]
     feature_dims = {}
 
-    for f in frames:
+    for f_id, f in enumerate(frames):
         if use_window:
             f_idx = np.arange(f-frame_window, f+frame_window, sampling_step, dtype=int)
         else:
@@ -125,6 +127,13 @@ def load_features_local(data, feature_list, sampling_step=5, frame_window=15, us
             elif feature == "tRot":
                 row.append(np.concatenate(
                     [frames[idx][jj]["rotMat"].ravel() for jj in keyJ for idx in f_idx]))
+            elif feature == "posCostDistance" or \
+                    feature == "rotCostAngle" or \
+                    feature == "posCost" or \
+                    feature == "rotCost":
+                row.append(np.concatenate(
+                    [frames[idx][jj][feature].ravel() for jj in keyJ for idx in f_idx]))
+
             # ALL JOINTS FEATURES
             elif feature == "rotMat":
                 row.append(np.concatenate([jo["rotMat"].ravel() for jo in f]))
@@ -136,7 +145,7 @@ def load_features_local(data, feature_list, sampling_step=5, frame_window=15, us
             if feature not in feature_dims:
                 feature_dims[feature] = row[-1].shape[0]
 
-            assert(np.isnan(row[-1]).sum() == 0, "{} contains NaN".format(feature))
+            assert np.isnan(row[-1]).sum() == 0, "{} contains NaN".format(feature)
 
         row = np.concatenate(row)
         clip.append(row)
@@ -280,7 +289,6 @@ def calc_tta(contacts):
         diff[diff < 0] = 0
         idx = np.where(diff > 0)[0]
         idx = [0] + list(idx)
-
         for i,k in zip(idx[:-1], idx[1:]):
             k2 = k-i
             tta[j][i:k] = np.arange(k2,0,-1)

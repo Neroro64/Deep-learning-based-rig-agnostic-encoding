@@ -97,7 +97,7 @@ def load_features(data, feature_list, sampling_step=5, frame_window=15, use_wind
             if feature not in feature_dims:
                 feature_dims[feature] = row[-1].shape[0]
 
-            assert(np.isnan(row[-1]).sum() == 0, "{} contains NaN".format(feature))
+            assert np.isnan(row[-1]).sum() == 0, "{} contains NaN".format(feature)
 
         row = np.concatenate(row)
         clip.append(row)

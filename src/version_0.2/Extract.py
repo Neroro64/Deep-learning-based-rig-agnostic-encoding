@@ -7,13 +7,14 @@ import ray
 import time
 import sys
 import func
-
+import scipy.signal as signal
+import rig_agnostic_encoding.functions.DataProcessingFunctions as Data
 """
 Global variables
 """
 PATH = "C:/Users/Neroro/AppData/LocalLow/DefaultCompany/Procedural Animation"
 THREADING = True
-CPUs = 24
+CPUs = 8
 
 
 def parseFloat3(struct:dict) -> np.ndarray:
@@ -58,12 +59,12 @@ def ParseRawSequence(clip:dict) -> dict:
     :return df: dict(targetPos:list, targetRot:list, frames:list(joints: list(features))
     """
 
-    targetPos = clip["frames"][0]["targetsPositions"]
-    targetRot = clip["frames"][0]["targetsRotations"]
+    # targetPos = clip["frames"][0]["targetsPositions"]
+    # targetRot = clip["frames"][0]["targetsRotations"]
 
     df = {}
-    df["targetPos"] = [parseFloat3(t) for t in targetPos]
-    df["targetRot"] = [parseFloat3(t) for t in targetRot]
+    # df["targetPos"] = [parseFloat3(t) for t in targetPos]
+    # df["targetRot"] = [parseFloat4(t) for t in targetRot]
 
     frames = []
     for frame in clip["frames"]:
@@ -71,11 +72,12 @@ def ParseRawSequence(clip:dict) -> dict:
         for jojo in frame["joints"]:
             jo = {}
 
-            jo["key"] = jojo["key"]
-            jo["isLeft"] = jojo["isLeft"]
-            jo["chainPos"] = jojo["chainPos"]
-            jo["geoDistance"] = jojo["geoDistance"]
-            jo["geoDistanceNormalised"] = jojo["geoDistanceNormalised"]
+            jo["key"] = np.asarray([jojo["key"]], dtype=np.float32)
+            jo["isLeft"] = np.asarray([jojo["isLeft"]], dtype=np.float32)
+            jo["chainPos"] = np.asarray([jojo["chainPos"]], dtype=np.float32)
+            jo["geoDistance"] = np.asarray([jojo["geoDistance"]], dtype=np.float32)
+            jo["geoDistanceNormalised"] = np.asarray([jojo["geoDistanceNormalised"]], dtype=np.float32)
+            jo["level"] = np.asarray([jojo["level"]], dtype=np.float32)
 
             jo["pos"] = parseFloat3(jojo["position"])
             jo["rotEuler"] = parseFloat3(jojo["rotEuler"])
@@ -87,6 +89,7 @@ def ParseRawSequence(clip:dict) -> dict:
             jo["inertial"] = parseFloat3x3(jojo["inertia"])
 
             jo["velocity"] = parseFloat3(jojo["velocity"])
+            jo["velocityMagnitude"] = np.asarray([jojo["velocityMagnitude"]], dtype=np.float32)
             jo["angularVelocity"] = parseFloat3(jojo["angularVelocity"])
             jo["linearMomentum"] = parseFloat3(jojo["linearMomentum"])
             jo["angularMomentum"] = parseFloat3(jojo["angularMomentum"])
@@ -103,77 +106,121 @@ def ParseRawSequence(clip:dict) -> dict:
             jo["targetPosition"] = parseFloat3(jojo["cost"]["TargetPosition"])
             jo["targetRotation"] = parseFloat3x3(jojo["cost"]["TargetRotation"])
 
-            jo["contact"] = jojo["contact"]
+            jo["posCostDistance"] = np.asarray([jojo["cost"]["ToTargetDistance"]],dtype=np.float32)
+            jo["rotCostAngle"] = np.asarray([jojo["cost"]["ToTargetRotationAngle"]], dtype=np.float32)
+
+            jo["contact"] = np.asarray([jojo["contact"]], dtype=np.float32)
 
             joints.append(jo)
         frames.append(joints)
     df["frames"] = frames
     return df
 
-
-def computeFeatures(clip:dict, window:int=12, clipSize:int=120) -> None:
+def calc_tta(contacts):
     """
-    Computes some extra features given the parsed animation sequence
-    :param clip:
-    :param window:
-    :param clipSize:
+    Calculates time-to-arriaval-embeddings, according to the paper [Robust Motion In-betweening]
+    :param contacts:
+    :param basis
     :return:
     """
 
-    contactFrame = 0
-    contactJoID = 0
-    for i in range(len(clip["frames"])-1):
-        f = clip["frames"][i]
-        f2 = clip["frames"][i+1]
-        for j in range(len(f)):
-            jo = f[j]
-            jo2 = f2[j]
+    tta = np.zeros_like(contacts)
+    for j, jo in enumerate(contacts):
+        idx = np.arange(len(jo))
+        idx[jo!=1] = 0
+        diff = np.diff(idx, prepend=0)
+        diff[diff < 0] = 0
+        idx = np.where(diff > 0)[0]
+        idx = [0] + list(idx)
+        for i,k in zip(idx[:-1], idx[1:]):
+            k2 = k-i
+            tta[j][i:k] = np.arange(k2,0,-1)
 
-            jo["posTrajectoryVec"] = jo2["pos"] - jo["pos"]    # position change
-            jo["dirTrajectoryVec"] = jo2["rotEuler"] - jo["rotEuler"]   # rotation change
+    return tta
 
-            if jo["key"] and jo["contact"] and contactFrame == 0:
-                contactFrame = i
-                contactJoID = j
+def calc_phase_vec_tta(clip, window_size_half=15):
+    frames = clip["frames"]
 
-            jo["phase"] = [0, 0]
-            jo["tta"] = [0]
+    block_fn = []
+    velocity = []
+    for f in frames:
+        block = np.concatenate([jo["contact"] for jo in f])
+        v = np.concatenate([jo["velocity"] for jo in f])
 
-    if (contactFrame > 0):
-        cycle = contactFrame / clipSize
-        for i in range(window, 0, -1):
-            index = contactFrame - i
-            if (index < 0):
-                continue
-            clip["frames"][index][contactJoID]["tta"] = i
-            clip["frames"][index][contactJoID]["phase"] = [1 - i/window, 0]
-        for i in range(clipSize-1):
-            clip["frames"][i][contactJoID]["phase"][1] = (i%cycle)/cycle * 2 * np.pi
+        block_fn.append(block)
+        velocity.append(v)
 
+    block_fn = np.vstack(block_fn).T
+    velocity = np.vstack(velocity).T
+
+    velocity = np.sqrt(np.sum(
+        (velocity.reshape((3,-1, velocity.shape[-1]))**2),axis=0))
+
+    ttas = calc_tta(block_fn)
+
+    Frames = block_fn.shape[1]
+    t = np.arange(Frames)
+    normalised_block_fn = np.zeros_like(block_fn, dtype=np.float32)
+
+    for ts in t:
+        low = max(ts-window_size_half, 0)
+        high = min(ts+window_size_half, Frames)
+        window = np.arange(low, high)
+        if len(window) < window_size_half*2:
+            window = np.pad(window, (window_size_half*2-len(window),), mode='edge')
+        slice = block_fn[:, window]
+        mean = np.mean(slice, axis=1)
+        std = np.std(slice, axis=1)
+        std[std == 0] = 1
+        normalised_block_fn[:, ts] = (block_fn[:, ts]-mean) / std
+
+    # normalised_block_fn = (block_fn2 - np.mean(block_fn2, axis=1, keepdims=True)) / np.std(block_fn2, axis=1, keepdims=True)
+    filter = signal.butter(3, .1, "low", analog=False, output="sos")
+    filtered = signal.sosfilt(filter, normalised_block_fn)
+    sin_y = np.sin(filtered)
+    cos_y = np.cos(filtered)
+    sin_diff = np.diff(sin_y, prepend=0)
+    cos_diff = np.diff(cos_y, prepend=0)
+    cos_diff[0]=0
+
+    phase_vec_l1 = np.stack([sin_y, cos_y],axis=0)
+    phase_vec_l2 = np.stack([sin_y*sin_diff, cos_y*cos_diff],axis=0)
+    phase_vec_l3 = np.stack([sin_y*sin_diff*velocity, cos_y*cos_diff*velocity],axis=0)
+    for f_id, f in enumerate(frames):
+        for jo_id, jo in enumerate(f):
+            jo["filtered_contact"] = filtered[jo_id, f_id]
+            jo["phase_vec_l1"] = phase_vec_l1[:, jo_id, f_id]
+            jo["phase_vec_l2"] = phase_vec_l2[:, jo_id, f_id]
+            jo["phase_vec_l3"] = phase_vec_l3[:, jo_id, f_id]
+            jo["tta"] = ttas[jo_id, f_id]
 
 @ray.remote
-def parse(raw:dict) -> object:
+def parse(filepath:str, id:str) -> object:
     """
     A remote task function that
         parses the raw  animation sequence from json.
         computes some features
         return the sequence in compressed binary format
-    :param raw:
+    :param filepath:
+    :param id:
     :return:
     """
+    raw = js.load(open(filepath, "r"))
     df = ParseRawSequence(raw)
-    computeFeatures(df)
-    return pickle.dumps(df)
+    calc_phase_vec_tta(df)
+    pickled = pickle.dumps(df)
+
+    del raw, df
+    return pickled, id
 
 
-def main(rawDataPath:str, outputName:str="dataset", path:str=PATH, use_threads:int=THREADING, outputPath:str="../data"):
+def main(raw_data_path:str, dirname:str, use_threads:int=THREADING, output_path:str="../../data"):
     """
     Given the path to the raw files, finds and parses all animation data. The data is then compressed as saved to <outputPath>.
-    :param rawDataPath:
-    :param outputName:
-    :param path:
+    :param raw_data_path:
+    :param dirname:
     :param use_threads:
-    :param outputPath:
+    :param output_path:
     :return:
     """
     if use_threads:
@@ -186,28 +233,25 @@ def main(rawDataPath:str, outputName:str="dataset", path:str=PATH, use_threads:i
     """
     Parse the raw data and compute features
     """
-    dfs = []
-    for dname, dirs, files in os.walk(os.path.join(path, rawDataPath)):
+    tasks = []
+    for dname, dirs, files in os.walk(raw_data_path):
         for fname in files:
             filePath = os.path.join(dname, fname)
-            raw = js.load(open(filePath, "r"))
             if use_threads:
-                raw_obj = ray.put(raw)
-                df = parse.remote(raw_obj)
-                dfs.append(df)
+                tasks.append(parse.remote(filePath, fname))
             else:
+                raw = js.load(open(filePath, "r"))
                 df = ParseRawSequence(raw)
-                computeFeatures(df)
-                save(df, fname.replace(".json", ""), rawDataPath)
+                calc_phase_vec_tta(df)
+                pickled = pickle.dumps(df)
+                Data.save3(pickled, fname.replace(".json", ""), os.path.join(output_path, dirname))
 
     if use_threads:
-        data = []
-        while len(dfs):
-            done_id, dfs = ray.wait(dfs)
-            f = ray.get(done_id[0])
-            data.append(f)
+        while len(tasks):
+            done_id, tasks = ray.wait(tasks)
+            pickled, f_id = ray.get(done_id[0])
 
-        save(data, os.path.join(outputPath, outputName))
+            Data.save3(pickled, f_id.replace(".json", ""), os.path.join(output_path, dirname))
         ray.shutdown()
 
     print("Done: {}".format(time.time() - start))
@@ -215,17 +259,13 @@ def main(rawDataPath:str, outputName:str="dataset", path:str=PATH, use_threads:i
 
 if __name__ == "__main__":
     rawPath = sys.argv[1]
-    if (rawPath == "-a"):
-        dataPaths = []
-        for dname, dirs, files in os.walk(os.path.join(PATH)):
-            for dir in dirs:
-                if not dir == ".idea" and not dir == "Unity":
-                    dataPaths.append(dir)
-            break
-        for path in dataPaths:
-            main(rawDataPath=path, outputName=path)
+    dataPaths = []
+    for dname, dirs, files in os.walk(rawPath):
+        for dir in dirs:
+            if not dir == ".idea" and not dir == "Unity":
+                dataPaths.append(dir)
+        break
+    for path in dataPaths:
+        main(raw_data_path=os.path.join(rawPath,path), dirname=path)
 
-    else:
-        output_name = sys.argv[2]
-        main(rawDataPath=rawPath, outputName=output_name)
 
