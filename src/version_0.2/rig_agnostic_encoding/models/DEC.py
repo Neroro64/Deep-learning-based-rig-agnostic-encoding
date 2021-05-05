@@ -110,6 +110,8 @@ class DEC(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
 
+        x = x.view(-1, x.shape[-1])
+        y = y.view(-1, y.shape[-1])
         prediction = self(x)
         loss = self.loss_fn(prediction, y)
 
@@ -119,6 +121,8 @@ class DEC(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         x, y = batch
 
+        x = x.view(-1, x.shape[-1])
+        y = y.view(-1, y.shape[-1])
         prediction = self(x)
         loss = self.loss_fn(prediction, y)
 
@@ -128,6 +132,8 @@ class DEC(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         x, y = batch
 
+        x = x.view(-1, x.shape[-1])
+        y = y.view(-1, y.shape[-1])
         prediction = self(x)
         loss = self.loss_fn(prediction, y)
 

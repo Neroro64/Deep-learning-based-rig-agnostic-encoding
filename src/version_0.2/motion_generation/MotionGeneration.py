@@ -19,13 +19,14 @@ from MLP import MLP
 
 
 class MotionGenerationModel(pl.LightningModule):
-    def __init__(self, config:dict=None, Model=None, pose_autoencoder=None, feature_dims=None,
+    def __init__(self, config:dict=None, Model=None, pose_autoencoder=None, middle_layer=None, feature_dims=None,
                  input_slicers:list=None, output_slicers:list=None,
-                 train_set=None, val_set=None, test_set=None, name="MotionGeneration"):
+                 train_set=None, val_set=None, test_set=None, name="MotionGeneration", workers=6):
         super().__init__()
 
         self.feature_dims = feature_dims
         self.config=config
+        self.workers = workers
 
         self.loss_fn = config["loss_fn"] if "loss_fn" in config else nn.functional.mse_loss
         self.opt = config["optimizer"] if "optimizer" in config else torch.optim.Adam
@@ -43,6 +44,8 @@ class MotionGenerationModel(pl.LightningModule):
 
         self.pose_autoencoder = pose_autoencoder if pose_autoencoder is not None else \
             MLP(config=config, dimensions=[feature_dims["pose_dim"]], name="PoseAE")
+        self.middle_layer = middle_layer if middle_layer is not None else \
+            nn.Linear(in_features=self.pose_autoencoder.dimensions[-1], out_features=self.pose_autoencoder.dimensions[-1])
         self.use_label = pose_autoencoder is not None and pose_autoencoder.use_label
 
         cost_hidden_dim = config["cost_hidden_dim"]
@@ -69,7 +72,7 @@ class MotionGenerationModel(pl.LightningModule):
     def forward(self, x):
         x_tensors = [x[:, d0:d1] for d0, d1 in zip(self.in_slices[:-1], self.in_slices[1:])]
 
-        pose_h = self.pose_autoencoder.encode(x_tensors[1])
+        pose_h = self.middle_layer(self.pose_autoencoder.encode(x_tensors[1]))
         embedding = torch.cat([pose_h, self.cost_encoder(x_tensors[2])], dim=1)
         out = self.generationModel(embedding, x_tensors[0])
         out_tensors = [out[:, d0:d1] for d0, d1 in zip(self.out_slices[:-1], self.out_slices[1:])]
@@ -201,6 +204,7 @@ class MotionGenerationModel(pl.LightningModule):
                  "in_slices":self.in_slices,
                  "out_slices":self.out_slices,
                  "feature_dims":self.feature_dims,
+                 "middle_layer_dict":self.middle_layer.state_dict(),
                  }
 
         if not os.path.exists(path):
@@ -210,7 +214,7 @@ class MotionGenerationModel(pl.LightningModule):
             pickle.dump(model, f)
 
     @staticmethod
-    def load_checkpoint(filename, Model):
+    def load_checkpoint(filename, Model, MiddleModel:nn.Module=None):
         with bz2.BZ2File(filename, "rb") as f:
             obj = pickle.load(f)
 
@@ -218,10 +222,17 @@ class MotionGenerationModel(pl.LightningModule):
         cost_encoder = MLP.load_checkpoint(obj["cost_encoder_path"])
         generationModel = Model.load_checkpoint(obj["motionGenerationModelPath"])
 
-        model = MotionGenerationModel(config=obj["config"], feature_dims=obj["feature_dims"],
+        model = MotionGenerationModel(config=obj["config"], feature_dims=obj["feature_dims"], Model=Model,
                                       input_slicers=obj["in_slices"], output_slicers=obj["out_slices"],
                                       name=obj["name"])
 
+        if MiddleModel is None:
+            MiddleModel = nn.Linear(in_features=pose_autoencoder.dimensions[-1], out_features=pose_autoencoder.dimensions[-11])
+
+        MiddleModel.load_state_dict(obj["middle_layer_dict"])
+        model.middle_layer = MiddleModel
+        model.in_slices = obj["in_slices"]
+        model.out_slices = obj["out_slices"]
         model.pose_autoencoder = pose_autoencoder
         model.cost_encoder = cost_encoder
         model.generationModel = generationModel

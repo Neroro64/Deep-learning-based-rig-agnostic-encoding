@@ -131,6 +131,8 @@ class VaDE(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
 
+        x = x.view(-1, x.shape[-1])
+        y = y.view(-1, y.shape[-1])
         prediction, z, mu, logvar = self(x)
         recon_loss = self.loss_fn(prediction, y)
         loss = [self.cluster_model.loss_function(z[i], mu[i], logvar[i]) for i in range(len(z))]
@@ -145,6 +147,8 @@ class VaDE(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         x, y = batch
 
+        x = x.view(-1, x.shape[-1])
+        y = y.view(-1, y.shape[-1])
         prediction, z, mu, logvar = self(x)
         recon_loss = self.loss_fn(prediction, y)
         loss = [self.cluster_model.loss_function(z[i], mu[i], logvar[i]) for i in range(len(z))]
@@ -159,6 +163,8 @@ class VaDE(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         x, y = batch
 
+        x = x.view(-1, x.shape[-1])
+        y = y.view(-1, y.shape[-1])
         prediction, z, mu, logvar = self(x)
         recon_loss = self.loss_fn(prediction, y)
         loss = [self.cluster_model.loss_function(z[i], mu[i], logvar[i]) for i in range(len(z))]

@@ -24,6 +24,7 @@ class MLP(pl.LightningModule):
         self.act = nn.ELU
         self.save_period = save_period
         self.workers = workers
+        self.config=config
 
         self.hidden_dim = config["hidden_dim"]
         self.keep_prob = config["keep_prob"]
@@ -47,6 +48,12 @@ class MLP(pl.LightningModule):
 
         self.encoder, self.decoder = nn.Module(), nn.Module()
         self.build()
+        if "device" not in config:
+            config["device"] = "cuda"
+
+        self.encoder.to(config["device"])
+        self.decoder.to(config["device"])
+
         self.encoder.apply(self.init_params)
         self.decoder.apply(self.init_params)
 
@@ -77,6 +84,7 @@ class MLP(pl.LightningModule):
             self.decoder = nn.Sequential(OrderedDict(layers))
         else:
             self.decoder = nn.Sequential()
+
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         return self.decode(self.encode(x))
@@ -137,6 +145,7 @@ class MLP(pl.LightningModule):
             "optimizer":self.opt,
             "scheduler":self.scheduler,
             "scheduler_param":self.scheduler_param,
+            "device":self.config["device"],
         }
         model = {"config":config, "name":self.name,"dimensions":self.dimensions,
                  "pose_labels": self.pose_labels,

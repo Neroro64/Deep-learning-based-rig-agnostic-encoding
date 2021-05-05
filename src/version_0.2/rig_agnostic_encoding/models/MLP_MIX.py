@@ -19,7 +19,7 @@ class MLP_MIX(pl.LightningModule):
                  train_set=None, val_set=None, test_set=None,
                  name:str="model", save_period=5, workers=6):
 
-        super(MLP_MIX, self).__init__()
+        super().__init__()
 
         M = len(input_dims)
 
@@ -44,20 +44,23 @@ class MLP_MIX(pl.LightningModule):
         self.scheduler = config["scheduler"] if "scheduler" in config else None
         self.scheduler_param = config["scheduler_param"] if "scheduler_param" in config else None
 
-        self.models = [MLP(config=config, dimensions=[input_dims[i]], pose_labels=self.pose_labels[i],
-                           name="M"+str(i), single_module=0) for i in range(M)]
-        self.active_models = self.models
-
-        self.cluster_model = nn.Sequential(
-            nn.Linear(in_features=self.k, out_features=self.k),self.act())
-        self.init_params(self.cluster_model)
-
+        self.models = []
+        self.active_models = []
+        self.cluster_model = nn.Sequential()
 
         self.train_set = train_set
         self.val_set = val_set
         self.test_set = test_set
 
         self.best_val_loss = np.inf
+
+        self.models = [MLP(config=self.config, dimensions=[self.input_dims[i]], pose_labels=self.pose_labels[i],
+                           name="M"+str(i), single_module=0) for i in range(M)]
+        self.active_models = self.models
+
+        self.cluster_model = nn.Sequential(
+            nn.Linear(in_features=self.k, out_features=self.k),self.act())
+        self.init_params(self.cluster_model)
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
         x_tensors = [x[:, d0:d1] for d0, d1 in zip(self.input_slice[:-1], self.input_slice[1:])]
@@ -71,6 +74,8 @@ class MLP_MIX(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
 
+        x = x.view(-1, x.shape[-1])
+        y = y.view(-1, y.shape[-1])
         prediction = self(x)
         loss = self.loss_fn(prediction, y)
 
@@ -80,6 +85,8 @@ class MLP_MIX(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         x, y = batch
 
+        x = x.view(-1, x.shape[-1])
+        y = y.view(-1, y.shape[-1])
         prediction = self(x)
         loss = self.loss_fn(prediction, y)
 
@@ -89,6 +96,8 @@ class MLP_MIX(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         x, y = batch
 
+        x = x.view(-1, x.shape[-1])
+        y = y.view(-1, y.shape[-1])
         prediction = self(x)
         loss = self.loss_fn(prediction, y)
 
