@@ -63,7 +63,7 @@ class VaDE_Layer(nn.Module):
         kl_loss /= z_log_var.numel()
 
         loss = torch.mean(kl_loss + logpzc + qentropy + logpc + logqcx)
-        return loss, kl_loss
+        return loss
 
     def forward(self, h):
         mu = self._enc_mu(h)

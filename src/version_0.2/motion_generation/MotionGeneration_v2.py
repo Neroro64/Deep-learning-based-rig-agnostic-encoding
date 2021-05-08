@@ -235,7 +235,7 @@ class MotionGenerationModel(pl.LightningModule):
                                       input_slicers=obj["in_slices"], output_slicers=obj["out_slices"],
                                       name=obj["name"])
         if MiddleModel is None:
-            MiddleModel = nn.Linear(in_features=pose_autoencoder.dimensions[-1], out_features=pose_autoencoder.dimensions[-11])
+            MiddleModel = nn.Linear(in_features=pose_autoencoder.dimensions[-1], out_features=pose_autoencoder.dimensions[-1])
 
         MiddleModel.load_state_dict(obj["middle_layer_dict"])
         model.in_slices = obj["in_slices"]

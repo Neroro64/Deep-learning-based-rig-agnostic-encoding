@@ -115,6 +115,8 @@ def load_features_task(data, feature_list, sampling_step=5, frame_window=15, use
             # KEY JOINTS ONLY FEATURES
             if "phase_vec" in feature:
                 row.append(np.concatenate([frames[idx][jj][feature].ravel() for jj in keyJ for idx in f_idx]))
+            elif feature == "tta":
+                row.append(np.concatenate([frames[idx][jj][feature].ravel() for jj in keyJ for idx in f_idx]))
             elif feature == "contact":
                 row.append(np.concatenate([frames[idx][jj]["contact"].ravel() for jj in keyJ for idx in f_idx]))
             elif feature == "targetRotation" or feature == "targetPosition":

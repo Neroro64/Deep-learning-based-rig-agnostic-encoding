@@ -18,11 +18,10 @@ from GlobalSettings import MODEL_PATH
 from MLP import MLP
 
 
-class MotionGenerationModelRNN(pl.LightningModule):
+class MotionGenerationModel(pl.LightningModule):
     def __init__(self, config:dict=None, Model=None, pose_autoencoder=None, middle_layer=None, feature_dims=None,
                  input_slicers:list=None, output_slicers:list=None,
-                 train_set=None, val_set=None, test_set=None, name="MotionGeneration",
-                 workers=6):
+                 train_set=None, val_set=None, test_set=None, name="MotionGeneration", workers=8):
         super().__init__()
 
         self.feature_dims = feature_dims
@@ -40,6 +39,7 @@ class MotionGenerationModelRNN(pl.LightningModule):
         self.autoregress_prob = config["autoregress_prob"]
         self.autoregress_inc = config["autoregress_inc"]
         self.autoregress_ep = config["autoregress_ep"]
+        self.autoregress_max_prob = config["autoregress_max_prob"]
 
         self.best_val_loss = np.inf
         self.phase_smooth_factor = 0.9
@@ -57,7 +57,7 @@ class MotionGenerationModelRNN(pl.LightningModule):
 
         self.generationModel =  Model(config=config,
                                       dimensions=[feature_dims["g_input_dim"], feature_dims["g_output_dim"]],
-                                      phase_input_dim = feature_dims["phase_dim"], device=config["device"])
+                                      phase_input_dim = feature_dims["phase_dim"])
 
         self.input_dims = input_slicers
         self.output_dims = output_slicers
@@ -74,14 +74,14 @@ class MotionGenerationModelRNN(pl.LightningModule):
     def forward(self, x):
         x_tensors = [x[:, d0:d1] for d0, d1 in zip(self.in_slices[:-1], self.in_slices[1:])]
 
-        pose_h = self.middle_layer(self.pose_autoencoder.encode(x_tensors[1]))
+        pose_h, mu, logvar = self.middle_layer(self.pose_autoencoder.encode(x_tensors[1]))
         embedding = torch.cat([pose_h, self.cost_encoder(x_tensors[2])], dim=1)
         out = self.generationModel(embedding, x_tensors[0])
         out_tensors = [out[:, d0:d1] for d0, d1 in zip(self.out_slices[:-1], self.out_slices[1:])]
         phase = self.update_phase(x_tensors[0], out_tensors[0])
         new_pose = self.pose_autoencoder.decode(out_tensors[1])
 
-        return [phase, new_pose, out_tensors[-1]]
+        return [phase, new_pose, out_tensors[-1]], pose_h, mu, logvar
 
     def computeCost(self, targets, trajectory):
         # targetPos = targets[:, :self.feature_dims["targetPosition"]]
@@ -111,88 +111,106 @@ class MotionGenerationModelRNN(pl.LightningModule):
 
         n = x.size()[1]
         tot_loss = 0
+        tot_kl_loss = 0
+        tot_recon_loss = 0
 
         x_c = x[:,0,:]
         autoregress_bools = torch.randn(n) < self.autoregress_prob
         for i in range(1, n):
             y_c = y[:,i-1,:]
 
-            self.generationModel.reset_hidden(batch_size=y_c.shape[0])
-
-            out= self(x_c)
+            out, z, mu, logvar = self(x_c)
             recon = torch.cat(out, dim=1)
             loss = self.loss_fn(recon, y_c)
-            tot_loss += loss.detach()
+            kl_loss =  self.middle_layer.loss_function(z, mu, logvar)
+
+            recon_loss = loss.detach()
+            kl_loss = kl_loss.detach()
+
+            tot_recon_loss += recon_loss
+            tot_loss += recon_loss + kl_loss
 
             opt.zero_grad()
-            self.manual_backward(loss)
+            self.manual_backward(loss+kl_loss)
             opt.step()
 
             if autoregress_bools[i]:
                 x_c = torch.cat(out,dim=1).detach()
-
-
             else:
                 x_c = x[:,i,:]
 
         tot_loss /= float(n)
-        return tot_loss
+        tot_recon_loss /= float(n)
+        tot_kl_loss /= float(n)
+        return tot_loss, tot_recon_loss, tot_kl_loss
 
     def step_eval(self, x, y):
         n = x.size()[1]
         tot_loss = 0
+        tot_kl_loss = 0
+        tot_recon_loss = 0
 
         x_c = x[:,0,:]
         autoregress_bools = torch.randn(n) < self.autoregress_prob
         for i in range(1, n):
             y_c = y[:,i-1,:]
 
-            self.generationModel.reset_hidden(batch_size=y_c.shape[0])
-
-            out= self(x_c)
+            out, z, mu, logvar = self(x_c)
             recon = torch.cat(out, dim=1)
             loss = self.loss_fn(recon, y_c)
-            tot_loss += loss.detach()
+            kl_loss = self.middle_layer.loss_function(z, mu, logvar)
+
+            recon_loss = loss.detach()
+            kl_loss = kl_loss.detach()
+
+            tot_recon_loss += recon_loss
+            tot_loss += recon_loss + kl_loss
 
             if autoregress_bools[i]:
                 x_c = torch.cat(out,dim=1).detach()
-
             else:
                 x_c = x[:,i,:]
 
         tot_loss /= float(n)
-        return tot_loss
+        tot_recon_loss /= float(n)
+        tot_kl_loss /= float(n)
+        return tot_loss, tot_recon_loss, tot_kl_loss
 
     def training_step(self, batch, batch_idx):
         x, y = batch
+
         x = x.view(-1, self.seq_len, x.shape[-1])
         y = y.view(-1, self.seq_len, y.shape[-1])
-        loss = self.step(x,y)
+        loss, recon_loss, kl_loss = self.step(x,y)
         self.log("ptl/train_loss", loss, prog_bar=True)
+        # self.log("ptl/train_recon_loss", recon_loss, prog_bar=True)
+        # self.log("ptl/train_kl_loss", kl_loss, prog_bar=True)
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
+
         x = x.view(-1, self.seq_len, x.shape[-1])
         y = y.view(-1, self.seq_len, y.shape[-1])
-
-        loss = self.step_eval(x,y)
+        loss, recon_loss, kl_loss = self.step_eval(x,y)
         self.log("ptl/val_loss", loss, prog_bar=True)
-
+        self.log("ptl/val_recon_loss", recon_loss, prog_bar=True)
+        self.log("ptl/val_kl_loss", kl_loss, prog_bar=True)
         return {"val_loss":loss}
 
     def test_step(self, batch, batch_idx):
         x, y = batch
+
         x = x.view(-1, self.seq_len, x.shape[-1])
         y = y.view(-1, self.seq_len, y.shape[-1])
-
-        loss = self.step_eval(x,y)
+        loss, recon_loss, kl_loss = self.step_eval(x,y)
         self.log("ptl/test_loss", loss, prog_bar=True)
-
+        self.log("ptl/test_recon_loss", recon_loss, prog_bar=True)
+        self.log("ptl/test_kl_loss", kl_loss, prog_bar=True)
         return {"test_loss":loss}
 
     def validation_epoch_end(self, outputs):
         if self.current_epoch > 0 and self.current_epoch % self.autoregress_ep == 0:
-            self.autoregress_prob = min(1, self.autoregress_prob+self.autoregress_inc)
+            self.autoregress_prob = min(self.autoregress_max_prob, self.autoregress_prob+self.autoregress_inc)
 
         avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
         self.log("avg_val_loss", avg_loss)
@@ -237,12 +255,11 @@ class MotionGenerationModelRNN(pl.LightningModule):
         cost_encoder = MLP.load_checkpoint(obj["cost_encoder_path"])
         generationModel = Model.load_checkpoint(obj["motionGenerationModelPath"])
 
-        model = MotionGenerationModelRNN(config=obj["config"], feature_dims=obj["feature_dims"],
+        model = MotionGenerationModel(config=obj["config"], feature_dims=obj["feature_dims"], Model=Model,
                                       input_slicers=obj["in_slices"], output_slicers=obj["out_slices"],
                                       name=obj["name"])
         if MiddleModel is None:
-            MiddleModel = nn.Linear(in_features=pose_autoencoder.dimensions[-1],
-                                    out_features=pose_autoencoder.dimensions[-11])
+            MiddleModel = nn.Linear(in_features=pose_autoencoder.dimensions[-1], out_features=pose_autoencoder.dimensions[-11])
 
         MiddleModel.load_state_dict(obj["middle_layer_dict"])
         model.in_slices = obj["in_slices"]

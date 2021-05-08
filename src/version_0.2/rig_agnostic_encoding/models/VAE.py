@@ -33,7 +33,7 @@ class VAE_Layer(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def loss_function(self, z_mean, z_log_var):
+    def loss_function(self, z, z_mean, z_log_var):
         kl_loss = -0.5 * (1 + z_log_var - z_mean.pow(2) - z_log_var.exp()).sum().clamp(max=0)
         kl_loss /= z_log_var.numel()
 
@@ -97,10 +97,7 @@ class VAE(pl.LightningModule):
         z = [vec[0] for vec in embeddings]
         mu = [vec[1] for vec in embeddings]
         logvar = [vec[2] for vec in embeddings]
-        if self.use_label:
-            decoded = [m.decode_label(z[i]) for i, m in enumerate(self.active_models)]
-        else:
-            decoded = [m.decode(z[i]) for i, m in enumerate(self.active_models)]
+        decoded = [m.decode(z[i]) for i, m in enumerate(self.active_models)]
 
         return torch.cat(decoded, dim=1), z, mu, logvar
 
@@ -111,7 +108,7 @@ class VAE(pl.LightningModule):
         y = y.view(-1, y.shape[-1])
         prediction, z, mu, logvar = self(x)
         recon_loss = self.loss_fn(prediction, y)
-        loss = [self.cluster_model.loss_function(mu[i], logvar[i]) for i in range(len(z))]
+        loss = [self.cluster_model.loss_function(z[i], mu[i], logvar[i]) for i in range(len(z))]
         kl_loss = sum(loss) / float(len(loss))
         loss = recon_loss+kl_loss
 
@@ -127,7 +124,7 @@ class VAE(pl.LightningModule):
         y = y.view(-1, y.shape[-1])
         prediction, z, mu, logvar = self(x)
         recon_loss = self.loss_fn(prediction, y)
-        loss = [self.cluster_model.loss_function(mu[i], logvar[i]) for i in range(len(z))]
+        loss = [self.cluster_model.loss_function(z[i], mu[i], logvar[i]) for i in range(len(z))]
         kl_loss = sum(loss) / float(len(loss))
         loss = recon_loss + kl_loss
 
@@ -143,7 +140,7 @@ class VAE(pl.LightningModule):
         y = y.view(-1, y.shape[-1])
         prediction, z, mu, logvar = self(x)
         recon_loss = self.loss_fn(prediction, y)
-        loss = [self.cluster_model.loss_function(mu[i], logvar[i]) for i in range(len(z))]
+        loss = [self.cluster_model.loss_function(z[i], mu[i], logvar[i]) for i in range(len(z))]
         kl_loss = sum(loss) / float(len(loss))
         loss = recon_loss + kl_loss
 

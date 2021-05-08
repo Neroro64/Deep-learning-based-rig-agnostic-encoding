@@ -59,7 +59,7 @@ class MLP_MIX(pl.LightningModule):
         self.active_models = self.models
 
         self.cluster_model = nn.Sequential(
-            nn.Linear(in_features=self.k, out_features=self.k),self.act())
+            nn.Linear(in_features=self.k, out_features=self.k))
         self.init_params(self.cluster_model)
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
