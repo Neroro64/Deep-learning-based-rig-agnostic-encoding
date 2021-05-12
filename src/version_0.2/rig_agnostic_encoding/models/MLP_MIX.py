@@ -12,6 +12,7 @@ from operator import add
 sys.path.append("../../")
 from GlobalSettings import DATA_PATH, MODEL_PATH
 from MLP import MLP
+from MLP_v2 import MLP as MLP_v2
 
 
 class MLP_MIX(pl.LightningModule):
@@ -36,6 +37,7 @@ class MLP_MIX(pl.LightningModule):
         self.hidden_dim = config["hidden_dim"]
         self.keep_prob = config["keep_prob"]
         self.k = config["k"]
+        self.z_dim = config["z_dim"]
         self.learning_rate = config["lr"]
         self.batch_size = config["batch_size"]
 
@@ -54,12 +56,17 @@ class MLP_MIX(pl.LightningModule):
 
         self.best_val_loss = np.inf
 
-        self.models = [MLP(config=self.config, dimensions=[self.input_dims[i]], pose_labels=self.pose_labels[i],
+        self.models = [MLP_v2(config=self.config, dimensions=[self.input_dims[i]], pose_labels=self.pose_labels[i],
                            name="M"+str(i), single_module=0) for i in range(M)]
+
         self.active_models = self.models
 
         self.cluster_model = nn.Sequential(
-            nn.Linear(in_features=self.k, out_features=self.k))
+            nn.Linear(in_features=self.k, out_features=self.z_dim),
+            nn.ELU(),
+            nn.Linear(in_features=self.z_dim, out_features=self.z_dim)
+        )
+
         self.init_params(self.cluster_model)
 
     def forward(self, x:torch.Tensor) -> torch.Tensor:
@@ -69,7 +76,8 @@ class MLP_MIX(pl.LightningModule):
         embeddings = [self.cluster_model(vec) for vec in encoded]
         decoded = [m.decode(embeddings[i]) for i, m in enumerate(self.active_models)]
 
-        return torch.cat(decoded, dim=1)
+
+        return decoded
 
     def training_step(self, batch, batch_idx):
         x, y = batch
@@ -77,7 +85,10 @@ class MLP_MIX(pl.LightningModule):
         x = x.view(-1, x.shape[-1])
         y = y.view(-1, y.shape[-1])
         prediction = self(x)
-        loss = self.loss_fn(prediction, y)
+        y_tensors = [y[:, d0:d1] for d0, d1 in zip(self.input_slice[:-1], self.input_slice[1:])]
+        losses = [self.active_models[i].loss(prediction[i], y_tensors[i])[0] for i in range(len(prediction))]
+
+        loss = sum(losses) / float(len(losses))
 
         self.log("ptl/train_loss", loss)
         return loss
@@ -88,7 +99,10 @@ class MLP_MIX(pl.LightningModule):
         x = x.view(-1, x.shape[-1])
         y = y.view(-1, y.shape[-1])
         prediction = self(x)
-        loss = self.loss_fn(prediction, y)
+        y_tensors = [y[:, d0:d1] for d0, d1 in zip(self.input_slice[:-1], self.input_slice[1:])]
+        losses = [self.active_models[i].loss(prediction[i], y_tensors[i])[0] for i in range(len(prediction))]
+
+        loss = sum(losses) / float(len(losses))
 
         self.log('ptl/val_loss', loss, prog_bar=True)
         return {"val_loss":loss}
@@ -99,7 +113,10 @@ class MLP_MIX(pl.LightningModule):
         x = x.view(-1, x.shape[-1])
         y = y.view(-1, y.shape[-1])
         prediction = self(x)
-        loss = self.loss_fn(prediction, y)
+        y_tensors = [y[:, d0:d1] for d0, d1 in zip(self.input_slice[:-1], self.input_slice[1:])]
+        losses = [self.active_models[i].loss(prediction[i], y_tensors[i])[0] for i in range(len(prediction))]
+
+        loss = sum(losses) / float(len(losses))
 
         self.log('ptl/test_loss', loss, prog_bar=True)
         return {"test_loss":loss}

@@ -139,7 +139,7 @@ def load_features_task(data, feature_list, sampling_step=5, frame_window=15, use
             elif feature == "rotMat" or feature == "rotMat2":
                 row.append(np.concatenate([f[jj][feature].ravel() for jj in joIDs]))
             elif feature == "isLeft" or feature == "chainPos" or feature == "geoDistanceNormalised":
-                row.append(np.concatenate([[f[jj][feature]] for jj in joIDs]))
+                row.append(np.concatenate([f[jj][feature] for jj in joIDs]))
             else:
                 row.append(np.concatenate([f[jj][feature].ravel() for jj in joIDs]))
 

@@ -12,65 +12,14 @@ from operator import add
 sys.path.append("../../")
 from GlobalSettings import DATA_PATH, MODEL_PATH
 from MLP import MLP
-from MLP_v2 import MLP as MLP_v2
-
-class RBF_Layer(nn.Module):
-    """
-       from JeremyLinux on GitHub {https://github.com/JeremyLinux/PyTorch-Radial-Basis-Function-Layer/blob/master/Torch%20RBF/torch_rbf.py}
-
-       Transforms incoming data using a given radial basis function:
-       u_{i} = rbf(||x - c_{i}|| / s_{i})
-       Arguments:
-           in_features: size of each input sample
-           out_features: size of each output sample
-       Shape:
-           - Input: (N, in_features) where N is an arbitrary batch size
-           - Output: (N, out_features) where N is an arbitrary batch size
-       Attributes:
-           centres: the learnable centres of shape (out_features, in_features).
-               The values are initialised from a standard normal distribution.
-               Normalising inputs to have mean 0 and standard deviation 1 is
-               recommended.
-
-           sigmas: the learnable scaling factors of shape (out_features).
-               The values are initialised as ones.
-
-           basis_func: the radial basis function used to transform the scaled
-               distances.
-       """
-
-    def __init__(self, in_features: int=0, out_features: int=0, basis_func=None):
-        super(RBF_Layer, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.centres = nn.Parameter(torch.Tensor(out_features, in_features))
-        self.sigmas = nn.Parameter(torch.Tensor(out_features))
-        self.basis_func = basis_func
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.normal_(self.centres, 0, 1)
-        nn.init.constant_(self.sigmas, .01)
-
-    def forward(self, x):
-        size = (x.size(0), self.out_features, self.in_features)
-        x = x.unsqueeze(1).expand(size)
-        c = self.centres.unsqueeze(0).expand(size)
-        distances = (x - c).pow(2).sum(-1).pow(0.5) * self.sigmas.unsqueeze(0)  # ALT. / (2*sigma**2)
-        return self.basis_func(distances)
-
-    def freeze(self, flag=False):
-        self.centres.requires_grad = flag
-        self.sigmas.requires_grad = flag
 
 
-
-class RBF(pl.LightningModule):
+class MLP_MIX(pl.LightningModule):
     def __init__(self, config:dict=None, input_dims:list=None, pose_labels=None,
                  train_set=None, val_set=None, test_set=None,
                  name:str="model", save_period=5, workers=6):
 
-        super(RBF, self).__init__()
+        super().__init__()
 
         M = len(input_dims)
 
@@ -84,12 +33,10 @@ class RBF(pl.LightningModule):
         self.pose_labels = pose_labels if pose_labels is not None else [None for _ in range(M)]
 
         self.config = config
-        self.basis_func = basis_func_dict()[config["basis_func"]]
         self.hidden_dim = config["hidden_dim"]
         self.keep_prob = config["keep_prob"]
         self.k = config["k"]
         self.z_dim = config["z_dim"]
-
         self.learning_rate = config["lr"]
         self.batch_size = config["batch_size"]
 
@@ -98,11 +45,9 @@ class RBF(pl.LightningModule):
         self.scheduler = config["scheduler"] if "scheduler" in config else None
         self.scheduler_param = config["scheduler_param"] if "scheduler_param" in config else None
 
-        self.models = [MLP_v2(config=config, dimensions=[input_dims[i]], pose_labels=self.pose_labels[i],
-                           name="M"+str(i), single_module=0) for i in range(M)]
-        self.active_models = self.models
-
-        self.cluster_model = RBF_Layer(in_features=self.k, out_features=self.z_dim, basis_func=self.basis_func)
+        self.models = []
+        self.active_models = []
+        self.cluster_model = nn.Sequential()
 
         self.train_set = train_set
         self.val_set = val_set
@@ -110,55 +55,75 @@ class RBF(pl.LightningModule):
 
         self.best_val_loss = np.inf
 
-    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        self.models = [MLP(config=self.config, dimensions=[self.input_dims[i]], pose_labels=self.pose_labels[i],
+                           name="M"+str(i), single_module=0) for i in range(M)]
+
+        self.active_models = self.models
+
+        self.cluster_model = nn.Sequential(
+            nn.Linear(in_features=self.z_dim, out_features=self.z_dim),
+            nn.ELU(),
+            nn.Linear(in_features=self.z_dim, out_features=self.z_dim)
+        )
+        self.cosine_simlarity = torch.nn.CosineSimilarity(dim=1).requires_grad_(False)
+        self.init_params(self.cluster_model)
+
+    def forward(self, x:torch.Tensor):
         x_tensors = [x[:, d0:d1] for d0, d1 in zip(self.input_slice[:-1], self.input_slice[1:])]
 
         encoded = [m.encode(x_tensors[i]) for i, m in enumerate(self.active_models)]
+        cosine_sim_before = [self.cosine_simlarity(e1, e2) for e1, e2 in zip(encoded[:-1], encoded[1:])]
         embeddings = [self.cluster_model(vec) for vec in encoded]
+        cosine_sim_after = [self.cosine_simlarity(e1, e2) for e1, e2 in zip(embeddings[:-1], embeddings[1:])]
         decoded = [m.decode(embeddings[i]) for i, m in enumerate(self.active_models)]
 
-        return decoded
+        cosine_loss = torch.mean(torch.vstack([c2 - c1 for c1, c2 in zip(cosine_sim_before, cosine_sim_after)]))
+        return decoded, cosine_loss
 
     def training_step(self, batch, batch_idx):
         x, y = batch
 
         x = x.view(-1, x.shape[-1])
         y = y.view(-1, y.shape[-1])
-        prediction = self(x)
+        prediction, cosine_loss = self(x)
         y_tensors = [y[:, d0:d1] for d0, d1 in zip(self.input_slice[:-1], self.input_slice[1:])]
         losses = [self.active_models[i].loss(prediction[i], y_tensors[i])[0] for i in range(len(prediction))]
 
         loss = sum(losses) / float(len(losses))
+
         self.log("ptl/train_loss", loss)
-        return loss
+        self.log("ptl/train_cosine_loss", cosine_loss)
+        return loss+cosine_loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
 
         x = x.view(-1, x.shape[-1])
         y = y.view(-1, y.shape[-1])
-        prediction = self(x)
+        prediction, cosine_loss = self(x)
         y_tensors = [y[:, d0:d1] for d0, d1 in zip(self.input_slice[:-1], self.input_slice[1:])]
         losses = [self.active_models[i].loss(prediction[i], y_tensors[i])[0] for i in range(len(prediction))]
 
         loss = sum(losses) / float(len(losses))
 
         self.log('ptl/val_loss', loss, prog_bar=True)
-        return {"val_loss":loss}
+        self.log('ptl/val_cosine_loss', cosine_loss, prog_bar=True)
+        return {"val_loss":loss+cosine_loss}
 
     def test_step(self, batch, batch_idx):
         x, y = batch
 
         x = x.view(-1, x.shape[-1])
         y = y.view(-1, y.shape[-1])
-        prediction = self(x)
+        prediction, cosine_loss = self(x)
         y_tensors = [y[:, d0:d1] for d0, d1 in zip(self.input_slice[:-1], self.input_slice[1:])]
         losses = [self.active_models[i].loss(prediction[i], y_tensors[i])[0] for i in range(len(prediction))]
 
         loss = sum(losses) / float(len(losses))
 
         self.log('ptl/test_loss', loss, prog_bar=True)
-        return {"test_loss":loss}
+        self.log('ptl/test_cosine_loss', cosine_loss, prog_bar=True)
+        return {"test_loss":loss+cosine_loss}
 
     def validation_epoch_end(self, outputs):
         avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
@@ -180,7 +145,6 @@ class RBF(pl.LightningModule):
             "optimizer": self.opt,
             "scheduler": self.scheduler,
             "scheduler_param": self.scheduler_param,
-            "basis_func":self.config["basis_func"],
         }
 
         model_paths = [m.save_checkpoint(best_val_loss=best_val_loss, checkpoint_dir=path) for m in self.models]
@@ -204,7 +168,7 @@ class RBF(pl.LightningModule):
     def load_checkpoint(filePath):
         with bz2.BZ2File(filePath, "rb") as f:
             obj = pickle.load(f)
-        model = RBF(config=obj["config"], name=obj["name"],
+        model = MLP_MIX(config=obj["config"], name=obj["name"],
                     input_dims=obj["input_dims"], pose_labels=obj["pose_labels"])
 
         models = [MLP.load_checkpoint(path) for path in obj["model_paths"]]
@@ -242,6 +206,7 @@ class RBF(pl.LightningModule):
         else:
             self.models += [MLP(config=self.config, dimensions=[input_dims[i]],
                             name="M" + str(i+n), single_module=0) for i in range(len(input_dims))]
+
         if freeze:
             for model in self.active_models:
                 model.freeze(True)
@@ -252,77 +217,3 @@ class RBF(pl.LightningModule):
             self.input_dims += input_dims
 
         self.input_slice = [0] + list(accumulate(add, self.input_dims))
-
-def gaussian(alpha):
-    phi = torch.exp(-1 * alpha.pow(2))
-    return phi
-
-
-def linear(alpha):
-    phi = alpha
-    return phi
-
-
-def quadratic(alpha):
-    phi = alpha.pow(2)
-    return phi
-
-
-def inverse_quadratic(alpha):
-    phi = torch.ones_like(alpha) / (torch.ones_like(alpha) + alpha.pow(2))
-    return phi
-
-
-def multiquadric(alpha):
-    phi = (torch.ones_like(alpha) + alpha.pow(2)).pow(0.5)
-    return phi
-
-
-def inverse_multiquadric(alpha):
-    phi = torch.ones_like(alpha) / (torch.ones_like(alpha) + alpha.pow(2)).pow(0.5)
-    return phi
-
-
-def spline(alpha):
-    phi = (alpha.pow(2) * torch.log(alpha + torch.ones_like(alpha)))
-    return phi
-
-
-def poisson_one(alpha):
-    phi = (alpha - torch.ones_like(alpha)) * torch.exp(-alpha)
-    return phi
-
-
-def poisson_two(alpha):
-    phi = ((alpha - 2 * torch.ones_like(alpha)) / 2 * torch.ones_like(alpha)) \
-          * alpha * torch.exp(-alpha)
-    return phi
-
-
-def matern32(alpha):
-    phi = (torch.ones_like(alpha) + 3 ** 0.5 * alpha) * torch.exp(-3 ** 0.5 * alpha)
-    return phi
-
-
-def matern52(alpha):
-    phi = (torch.ones_like(alpha) + 5 ** 0.5 * alpha + (5 / 3) \
-           * alpha.pow(2)) * torch.exp(-5 ** 0.5 * alpha)
-    return phi
-
-
-def basis_func_dict():
-    """
-    A helper function that returns a dictionary containing each RBF
-    """
-    bases = {'gaussian': gaussian,
-             'linear': linear,
-             'quadratic': quadratic,
-             'inverse quadratic': inverse_quadratic,
-             'multiquadric': multiquadric,
-             'inverse multiquadric': inverse_multiquadric,
-             'spline': spline,
-             'poisson one': poisson_one,
-             'poisson two': poisson_two,
-             'matern32': matern32,
-             'matern52': matern52}
-    return bases

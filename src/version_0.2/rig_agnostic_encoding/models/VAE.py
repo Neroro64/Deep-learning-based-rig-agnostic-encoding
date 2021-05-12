@@ -16,6 +16,7 @@ sys.path.append("../../")
 from GlobalSettings import DATA_PATH, MODEL_PATH
 from torch.distributions import Normal
 from MLP import MLP
+from MLP_v2 import MLP as MLP_v2
 
 
 """
@@ -68,6 +69,7 @@ class VAE(pl.LightningModule):
         self.hidden_dim = config["hidden_dim"]
         self.keep_prob = config["keep_prob"]
         self.k = config["k"]
+        self.z_dim = config["z_dim"]
         self.learning_rate = config["lr"]
         self.batch_size = config["batch_size"]
 
@@ -76,11 +78,11 @@ class VAE(pl.LightningModule):
         self.scheduler = config["scheduler"] if "scheduler" in config else None
         self.scheduler_param = config["scheduler_param"] if "scheduler_param" in config else None
 
-        self.models = [MLP(config=config, dimensions=[input_dims[i]], pose_labels=self.pose_labels[i],
+        self.models = [MLP_v2(config=config, dimensions=[input_dims[i]], pose_labels=self.pose_labels[i],
                            name="M" + str(i), single_module=0) for i in range(M)]
         self.active_models = self.models
 
-        self.cluster_model = VAE_Layer(layer_size=[self.k, self.k])
+        self.cluster_model = VAE_Layer(layer_size=[self.k, self.z_dim])
 
         self.train_set = train_set
         self.val_set = val_set

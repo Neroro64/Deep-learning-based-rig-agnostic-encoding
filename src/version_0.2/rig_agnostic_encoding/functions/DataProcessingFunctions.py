@@ -82,17 +82,15 @@ def load_features(data, feature_list, sampling_step=5, frame_window=15, use_wind
             elif feature == "rotMat":
                 row.append(np.concatenate([jo["rotMat"].ravel() for jo in f]))
             elif feature == "isLeft" or feature == "chainPos" or feature == "geoDistanceNormalised":
-                row.append(np.concatenate([[jo[feature]] for jo in f]))
+                row.append(np.concatenate([jo[feature].ravel() for jo in f]).ravel())
             else:
                 row.append(np.concatenate([jo[feature] for jo in f]))
-
 
             if feature not in feature_dims:
                 feature_dims[feature] = row[-1].shape[0]
 
             assert np.isnan(row[-1]).sum() == 0, "{} contains NaN".format(feature)
-
-        row = np.concatenate(row)
+            row = np.concatenate(row)
         clip.append(row)
     output = np.copy(np.vstack(clip))
     del data, frames, keyJ, clip, row
@@ -138,7 +136,7 @@ def load_features_local(data, feature_list, sampling_step=5, frame_window=15, us
             elif feature == "rotMat":
                 row.append(np.concatenate([jo["rotMat"].ravel() for jo in f]))
             elif feature == "isLeft" or feature == "chainPos" or feature == "geoDistanceNormalised":
-                row.append(np.concatenate([[jo[feature]] for jo in f]))
+                row.append(np.concatenate([jo[feature] for jo in f]))
             else:
                 row.append(np.concatenate([jo[feature] for jo in f]))
 

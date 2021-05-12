@@ -39,13 +39,14 @@ class RBF_Layer(nn.Module):
                distances.
        """
 
-    def __init__(self, in_features: int=0, out_features: int=0, basis_func=None):
+    def __init__(self, in_features: int=0, out_features: int=0, basis_func=None, device="cuda"):
         super(RBF_Layer, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.centres = nn.Parameter(torch.Tensor(out_features, in_features))
         self.sigmas = nn.Parameter(torch.Tensor(out_features))
         self.basis_func = basis_func
+        self.device = device
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -62,6 +63,10 @@ class RBF_Layer(nn.Module):
     def freeze(self, flag=False):
         self.centres.requires_grad = flag
         self.sigmas.requires_grad = flag
+
+    def loss(self):
+        return torch.nn.functional.mse_loss(self.centres @ self.centres.T, torch.diag(torch.ones(self.out_features, device=self.device)))
+        # return torch.mean((1 - (self.centres @ self.centres.T).sum(dim=1))**2)
 
 
 
@@ -127,10 +132,12 @@ class RBF(pl.LightningModule):
         prediction = self(x)
         y_tensors = [y[:, d0:d1] for d0, d1 in zip(self.input_slice[:-1], self.input_slice[1:])]
         losses = [self.active_models[i].loss(prediction[i], y_tensors[i])[0] for i in range(len(prediction))]
+        ortho_loss = self.cluster_model.loss()
 
         loss = sum(losses) / float(len(losses))
         self.log("ptl/train_loss", loss)
-        return loss
+        self.log("ptl/train_ortho_loss", ortho_loss)
+        return loss+ortho_loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
@@ -142,9 +149,11 @@ class RBF(pl.LightningModule):
         losses = [self.active_models[i].loss(prediction[i], y_tensors[i])[0] for i in range(len(prediction))]
 
         loss = sum(losses) / float(len(losses))
+        ortho_loss = self.cluster_model.loss()
 
         self.log('ptl/val_loss', loss, prog_bar=True)
-        return {"val_loss":loss}
+        self.log("ptl/val_ortho_loss", ortho_loss, prog_bar=True)
+        return {"val_loss":loss+ortho_loss}
 
     def test_step(self, batch, batch_idx):
         x, y = batch
@@ -156,9 +165,11 @@ class RBF(pl.LightningModule):
         losses = [self.active_models[i].loss(prediction[i], y_tensors[i])[0] for i in range(len(prediction))]
 
         loss = sum(losses) / float(len(losses))
+        ortho_loss = self.cluster_model.loss()
 
         self.log('ptl/test_loss', loss, prog_bar=True)
-        return {"test_loss":loss}
+        self.log("ptl/test_ortho_loss", ortho_loss, prog_bar=True)
+        return {"test_loss":loss+ortho_loss}
 
     def validation_epoch_end(self, outputs):
         avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()

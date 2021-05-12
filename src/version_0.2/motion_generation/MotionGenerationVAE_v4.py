@@ -47,7 +47,7 @@ class MotionGenerationModel(pl.LightningModule):
         self.pose_autoencoder = pose_autoencoder if pose_autoencoder is not None else \
             MLP(config=config, dimensions=[feature_dims["pose_dim"]], name="PoseAE")
         self.middle_layer = middle_layer if middle_layer is not None else \
-            nn.Sequential(nn.Linear(in_features=self.pose_autoencoder.dimensions[-1], out_features=self.pose_autoencoder.dimensions[-1]))
+            nn.Linear(in_features=self.pose_autoencoder.dimensions[-1], out_features=self.pose_autoencoder.dimensions[-1])
         self.use_label = pose_autoencoder is not None and pose_autoencoder.use_label
 
         cost_hidden_dim = config["cost_hidden_dim"]
@@ -59,11 +59,17 @@ class MotionGenerationModel(pl.LightningModule):
                                       dimensions=[feature_dims["g_input_dim"], feature_dims["g_output_dim"]],
                                       phase_input_dim = feature_dims["phase_dim"])
 
-
         self.input_dims = input_slicers
         self.output_dims = output_slicers
         self.in_slices = [0] + list(accumulate(add, input_slicers))
         self.out_slices = [0] + list(accumulate(add, output_slicers))
+
+        self.phase_dim = feature_dims["phase_dim"]
+        self.posCost_dim = self.in_slices[-2] + feature_dims["posCost"]
+        self.rotCost_dim = self.posCost_dim + feature_dims["rotCost"]
+        self.pos_dim = feature_dims["pos_dim"]
+        self.rot_dim = self.phase_dim + feature_dims["pos_dim"] + feature_dims["rot_dim"]
+        self.vel_dim = self.rot_dim + feature_dims["vel_dim"]
 
         self.train_set = train_set
         self.val_set = val_set
@@ -75,34 +81,87 @@ class MotionGenerationModel(pl.LightningModule):
     def forward(self, x):
         x_tensors = [x[:, d0:d1] for d0, d1 in zip(self.in_slices[:-1], self.in_slices[1:])]
 
-        pose_h = self.middle_layer(self.pose_autoencoder.encode(x_tensors[1]))
+        pose_h, mu, logvar = self.middle_layer(self.pose_autoencoder.encode(x_tensors[1]))
         embedding = torch.cat([pose_h, self.cost_encoder(x_tensors[2])], dim=1)
         out = self.generationModel(embedding, x_tensors[0])
         out_tensors = [out[:, d0:d1] for d0, d1 in zip(self.out_slices[:-1], self.out_slices[1:])]
         phase = self.update_phase(x_tensors[0], out_tensors[0])
         new_pose = self.pose_autoencoder.decode(out_tensors[1])
 
-        return [phase, new_pose, out_tensors[-1]]
+        return [phase, new_pose, out_tensors[-1]], pose_h, mu, logvar
+
+
 
     def step(self, x, y):
         opt = self.optimizers()
 
         n = x.size()[1]
         tot_loss = 0
+        tot_kl_loss = 0
+        tot_recon_loss = 0
+
+        tot_pos_loss = 0
+        tot_rot_loss = 0
+
+        min_pos_cost = 100
+        min_target_pos_cost = 100
+        min_rot_cost = 100
+        min_target_rot_cost = 100
+
+        sum_pos_cost = 0
+        sum_target_pos_cost = 0
+        sum_rot_cost = 0
+        sum_target_rot_cost = 0
 
         x_c = x[:,0,:]
         autoregress_bools = torch.randn(n) < self.autoregress_prob
         for i in range(1, n):
             y_c = y[:,i-1,:]
 
-            out= self(x_c)
+            out, z, mu, logvar = self(x_c)
             recon = torch.cat(out, dim=1)
+
             loss = self.loss_fn(recon, y_c)
-            tot_loss += loss.detach()
+            kl_loss =  self.middle_layer.loss_function(z, mu, logvar)
 
             opt.zero_grad()
-            self.manual_backward(loss)
+            self.manual_backward(loss + kl_loss)
             opt.step()
+
+            recon_loss = loss.detach()
+            kl_loss = kl_loss.detach()
+
+            pos_x = recon[:, self.phase_dim:self.pos_dim]
+            pos_y = y_c[:, self.phase_dim:self.pos_dim]
+
+            rot_x = recon[:, self.pos_dim:self.rot_dim]
+            rot_y = y_c[:, self.pos_dim:self.rot_dim]
+
+            pos_cost_x = torch.mean(recon[:, self.in_slices[-2]:self.posCost_dim]).detach()
+            rot_cost_x = torch.mean(recon[:, self.posCost_dim:]).detach()
+
+            pos_cost_y = torch.mean(y_c[:, self.in_slices[-2]:self.posCost_dim]).detach()
+            rot_cost_y = torch.mean(y_c[:, self.posCost_dim:]).detach()
+
+            pos_loss = self.loss_fn(pos_x, pos_y)
+            rot_loss = self.loss_fn(rot_x, rot_y)
+
+            tot_pos_loss += pos_loss.detach()
+            tot_rot_loss += rot_loss.detach()
+
+            min_pos_cost = min(pos_cost_x, min_pos_cost)
+            min_target_pos_cost = min(pos_cost_y, min_target_pos_cost)
+            min_rot_cost = min(rot_cost_x, min_rot_cost)
+            min_target_rot_cost = min(rot_cost_y, min_target_rot_cost)
+
+            sum_pos_cost += pos_cost_x
+            sum_target_pos_cost += pos_cost_y
+            sum_rot_cost += rot_cost_x
+            sum_target_rot_cost += rot_cost_y
+
+            tot_recon_loss += recon_loss
+            tot_loss += recon_loss + kl_loss
+            tot_kl_loss += kl_loss
 
             if autoregress_bools[i]:
                 x_c = torch.cat(out,dim=1).detach()
@@ -110,46 +169,144 @@ class MotionGenerationModel(pl.LightningModule):
                 x_c = x[:,i,:]
 
         tot_loss /= float(n)
-        return tot_loss
+        tot_recon_loss /= float(n)
+        tot_kl_loss /= float(n)
+        tot_pos_loss /= float(n)
+        tot_rot_loss /= float(n)
+
+        return tot_loss, tot_pos_loss, tot_rot_loss,tot_recon_loss, tot_kl_loss, \
+               min_pos_cost, min_rot_cost, min_target_pos_cost, min_target_rot_cost,\
+               sum_pos_cost, sum_rot_cost, sum_target_pos_cost, sum_target_rot_cost
 
     def step_eval(self, x, y):
         n = x.size()[1]
         tot_loss = 0
+        tot_kl_loss = 0
+        tot_recon_loss = 0
 
-        x_c = x[:,0,:]
+        tot_pos_loss = 0
+        tot_rot_loss = 0
+
+        min_pos_cost = 100
+        min_target_pos_cost = 100
+        min_rot_cost = 100
+        min_target_rot_cost = 100
+
+        sum_pos_cost = 0
+        sum_target_pos_cost = 0
+        sum_rot_cost = 0
+        sum_target_rot_cost = 0
+
+        x_c = x[:, 0, :]
         autoregress_bools = torch.randn(n) < self.autoregress_prob
         for i in range(1, n):
-            y_c = y[:,i-1,:]
+            y_c = y[:, i - 1, :]
 
-            out= self(x_c)
+            out, z, mu, logvar = self(x_c)
             recon = torch.cat(out, dim=1)
+
             loss = self.loss_fn(recon, y_c)
-            tot_loss += loss.detach()
+            kl_loss = self.middle_layer.loss_function(z, mu, logvar)
+
+            recon_loss = loss.detach()
+            kl_loss = kl_loss.detach()
+
+            pos_x = recon[:, self.phase_dim:self.pos_dim]
+            pos_y = y_c[:, self.phase_dim:self.pos_dim]
+
+            rot_x = recon[:, self.pos_dim:self.rot_dim]
+            rot_y = y_c[:, self.pos_dim:self.rot_dim]
+
+            pos_cost_x = torch.mean(recon[:, self.in_slices[-2]:self.posCost_dim]).detach()
+            rot_cost_x = torch.mean(recon[:, self.posCost_dim:]).detach()
+
+            pos_cost_y = torch.mean(y_c[:, self.in_slices[-2]:self.posCost_dim]).detach()
+            rot_cost_y = torch.mean(y_c[:, self.posCost_dim:]).detach()
+
+            pos_loss = self.loss_fn(pos_x, pos_y)
+            rot_loss = self.loss_fn(rot_x, rot_y)
+
+            tot_pos_loss += pos_loss.detach()
+            tot_rot_loss += rot_loss.detach()
+
+            min_pos_cost = min(pos_cost_x, min_pos_cost)
+            min_target_pos_cost = min(pos_cost_y, min_target_pos_cost)
+            min_rot_cost = min(rot_cost_x, min_rot_cost)
+            min_target_rot_cost = min(rot_cost_y, min_target_rot_cost)
+
+            sum_pos_cost += pos_cost_x
+            sum_target_pos_cost += pos_cost_y
+            sum_rot_cost += rot_cost_x
+            sum_target_rot_cost += rot_cost_y
+
+            tot_recon_loss += recon_loss
+            tot_loss += recon_loss + kl_loss
+            tot_kl_loss +=kl_loss
 
             if autoregress_bools[i]:
-                x_c = torch.cat(out,dim=1).detach()
+                x_c = torch.cat(out, dim=1).detach()
             else:
-                x_c = x[:,i,:]
+                x_c = x[:, i, :]
 
         tot_loss /= float(n)
-        return tot_loss
+        tot_recon_loss /= float(n)
+        tot_kl_loss /= float(n)
+        tot_pos_loss /= float(n)
+        tot_rot_loss /= float(n)
+
+        return tot_loss, tot_pos_loss, tot_rot_loss, tot_recon_loss, tot_kl_loss, \
+               min_pos_cost, min_rot_cost, min_target_pos_cost, min_target_rot_cost, \
+               sum_pos_cost, sum_rot_cost, sum_target_pos_cost, sum_target_rot_cost
 
     def training_step(self, batch, batch_idx):
         x, y = batch
 
         x = x.view(-1, self.seq_len, x.shape[-1])
         y = y.view(-1, self.seq_len, y.shape[-1])
-        loss = self.step(x,y)
+        loss, tot_pos_loss, tot_rot_loss, recon_loss, kl_loss,\
+               min_pos_cost, min_rot_cost, min_target_pos_cost, min_target_rot_cost,\
+               sum_pos_cost, sum_rot_cost, sum_target_pos_cost, sum_target_rot_cost = self.step(x,y)
+
         self.log("ptl/train_loss", loss, prog_bar=True)
+        self.log("ptl/train_recon_loss", recon_loss)
+        self.log("ptl/train_kl_loss", kl_loss)
+        self.log("ptl/train_pos_loss", tot_pos_loss)
+        self.log("ptl/train_rot_loss", tot_rot_loss)
+
+        self.log("ptl/train_min_pos_cost", min_pos_cost)
+        self.log("ptl/train_min_target_pos_cost", min_target_pos_cost)
+        self.log("ptl/train_min_rot_cost", min_rot_cost)
+        self.log("ptl/train_min_target_rot_cost", min_target_rot_cost)
+
+        self.log("ptl/train_sum_pos_cost", sum_pos_cost)
+        self.log("ptl/train_sum_target_pos_cost", sum_target_pos_cost)
+        self.log("ptl/train_sum_rot_cost", sum_rot_cost)
+        self.log("ptl/train_sum_target_rot_cost", sum_target_rot_cost)
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
 
         x = x.view(-1, self.seq_len, x.shape[-1])
         y = y.view(-1, self.seq_len, y.shape[-1])
-        loss = self.step_eval(x,y)
-        self.log("ptl/val_loss", loss, prog_bar=True)
+        loss, tot_pos_loss, tot_rot_loss, recon_loss, kl_loss, \
+               min_pos_cost, min_rot_cost, min_target_pos_cost, min_target_rot_cost,\
+               sum_pos_cost, sum_rot_cost, sum_target_pos_cost, sum_target_rot_cost = self.step_eval(x,y)
 
+        self.log("ptl/val_pos_loss", tot_pos_loss,prog_bar=True)
+        self.log("ptl/val_rot_loss", tot_rot_loss,prog_bar=True)
+
+        self.log("ptl/val_min_pos_cost", min_pos_cost)
+        self.log("ptl/val_min_target_pos_cost", min_target_pos_cost)
+        self.log("ptl/val_min_rot_cost", min_rot_cost)
+        self.log("ptl/val_min_target_rot_cost", min_target_rot_cost)
+
+        self.log("ptl/val_sum_pos_cost", sum_pos_cost)
+        self.log("ptl/val_sum_target_pos_cost", sum_target_pos_cost)
+        self.log("ptl/val_sum_rot_cost", sum_rot_cost)
+        self.log("ptl/val_sum_target_rot_cost", sum_target_rot_cost)
+        self.log("ptl/val_loss", loss, prog_bar=True)
+        self.log("ptl/val_recon_loss", recon_loss, prog_bar=True)
+        self.log("ptl/val_kl_loss", kl_loss, prog_bar=True)
         return {"val_loss":loss}
 
     def test_step(self, batch, batch_idx):
@@ -157,9 +314,24 @@ class MotionGenerationModel(pl.LightningModule):
 
         x = x.view(-1, self.seq_len, x.shape[-1])
         y = y.view(-1, self.seq_len, y.shape[-1])
-        loss = self.step_eval(x,y)
+        loss, tot_pos_loss, tot_rot_loss,recon_loss, kl_loss,\
+        min_pos_cost, min_rot_cost, min_target_pos_cost, min_target_rot_cost, \
+        sum_pos_cost, sum_rot_cost, sum_target_pos_cost, sum_target_rot_cost = self.step_eval(x, y)
         self.log("ptl/test_loss", loss, prog_bar=True)
+        self.log("ptl/test_pos_loss", tot_pos_loss, prog_bar=True)
+        self.log("ptl/test_rot_loss", tot_rot_loss, prog_bar=True)
 
+        self.log("ptl/test_min_pos_cost", min_pos_cost, prog_bar=True)
+        self.log("ptl/test_min_target_pos_cost", min_target_pos_cost, prog_bar=True)
+        self.log("ptl/test_min_rot_cost", min_rot_cost, prog_bar=True)
+        self.log("ptl/test_min_target_rot_cost", min_target_rot_cost, prog_bar=True)
+
+        self.log("ptl/test_sum_pos_cost", sum_pos_cost, prog_bar=True)
+        self.log("ptl/test_sum_target_pos_cost", sum_target_pos_cost, prog_bar=True)
+        self.log("ptl/test_sum_rot_cost", sum_rot_cost, prog_bar=True)
+        self.log("ptl/test_sum_target_rot_cost", sum_target_rot_cost, prog_bar=True)
+        self.log("ptl/test_recon_loss", recon_loss, prog_bar=True)
+        self.log("ptl/test_kl_loss", kl_loss, prog_bar=True)
         return {"test_loss":loss}
 
     def validation_epoch_end(self, outputs):
@@ -213,7 +385,7 @@ class MotionGenerationModel(pl.LightningModule):
                                       input_slicers=obj["in_slices"], output_slicers=obj["out_slices"],
                                       name=obj["name"])
         if MiddleModel is None:
-            MiddleModel = nn.Linear(in_features=pose_autoencoder.dimensions[-1], out_features=pose_autoencoder.dimensions[-1])
+            MiddleModel = nn.Linear(in_features=pose_autoencoder.dimensions[-1], out_features=pose_autoencoder.dimensions[-11])
 
         MiddleModel.load_state_dict(obj["middle_layer_dict"])
         model.in_slices = obj["in_slices"]
