@@ -1,3 +1,12 @@
-,Raw,Frozen,Trained
-recon_error,2.485e-75,1.495e-11,1.901e-13
-delta_rot,2.399e-03,3.153e-01,3.736e-01
+﻿,Ref. vs Raw,Ref. vs Frozen,Ref. vs Trained,Raw vs Frozen,Raw vs Trained,Frozen vs Trained
+RE. error,2.49e-75,1.50e-11,1.90e-13,3.90e-62,1.17e-12,8.44e-01
+RMS,2.40e-03,3.15e-01,3.74e-01,1.76e-03,2.09e-01,1.12e-02,
+
+
+
+
+
+
+
+
+,,,,,,,
