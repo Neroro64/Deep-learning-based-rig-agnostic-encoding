@@ -1,6 +1,0 @@
-Best hyperparameters found were:  {'k': 236, 'hidden_dim': 512, 'lr': 0.00015172510457643694, 'batch_size': 60, 'loss_fn': <function mae_mae_loss at 0x7fc2a20bcaf0>, 'ae_loss_fn': <function mse_loss at 0x7fc2a20bc790>, 'activation': <class 'torch.nn.modules.activation.ReLU'>}
-Best achieved loss was:  {'loss': 0.0047869449481368065, 'time_this_iter_s': 0.4041297435760498, 'done': True, 'timesteps_total': None, 'episodes_total': None, 'training_iteration': 65, 'experiment_id': 'e4370d58c3744ffd9e280555faaa3a22', 'date': '2021-04-04_12-05-56', 'timestamp': 1617530756, 'time_total_s': 77.70159816741943, 'pid': 564547, 'hostname': 'Desktop', 'node_ip': '192.168.1.35', 'config': {'k': 236, 'hidden_dim': 512, 'lr': 0.00015172510457643694, 'batch_size': 60, 'loss_fn': <function mae_mae_loss at 0x7fc2a20bcaf0>, 'ae_loss_fn': <function mse_loss at 0x7fc2a20bc790>, 'activation': <class 'torch.nn.modules.activation.ReLU'>}, 'time_since_restore': 77.70159816741943, 'timesteps_since_restore': 0, 'iterations_since_restore': 65, 'trial_id': 'abeda_00044', 'experiment_tag': "44_activation=<class 'torch.nn.modules.activation.ReLU'>,ae_loss_fn=<function mse_loss at 0x7fc2a20bc790>,batch_size=60,hidden_dim=512,k=236,loss_fn=<function mae_mae_loss at 0x7fc2a20bcaf0>,lr=0.00015173"}
-
-Time: 49m30s
-loss: 0.0048
-165-180 it/s

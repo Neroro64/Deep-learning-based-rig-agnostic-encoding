@@ -1,5 +1,0 @@
-,recon_error,adv_error,rot_error,delta_rot
-Raw_vs_Frozen,0.0,0.0,0.0,0.002
-Raw_vs_Trained,0.0,0.001,0.0,0.209
-Frozen_vs_Trained,0.844,0.177,0.92,0.011
-All,0.0,0.0,0.0,0.0

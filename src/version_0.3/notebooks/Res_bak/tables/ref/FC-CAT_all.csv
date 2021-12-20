@@ -1,5 +1,0 @@
-,recon_error,adv_error,rot_error,delta_rot
-RBF_vs_VAE,0.261,0.981,0.206,0.075
-RBF_vs_DEC,0.0,0.871,0.001,0.449
-VAE_vs_DEC,0.0,0.594,0.058,0.009
-All,0.0,0.85,0.002,0.0
